@@ -27,3 +27,15 @@ The results are as follows:
   </table>
 </div>
 where the dark blue curve is with grayscale images as input, the pink curve is with vector values as input and the light blue curve is with both as input.
+
+The agent can move forward as:
+<p align="center">
+  <table>
+    <tr>
+      <td><img src="assets/exp/vector.gif" width="300" /><br>Vector Values Input</td>
+      <td><img src="assets/exp/grayscale.gif" width="300" /><br>Grayscale Images Input</td>
+      <td><img src="assets/exp/both.gif" width="300" /><br>Both Input</td>
+    </tr>
+  </table>
+</p>
+
