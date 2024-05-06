@@ -13,5 +13,5 @@ The algorithm is dreamer v3 and the environment is the walker from the Deepmind 
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_vector
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale_vector
-
+```
 The results are as follows:
