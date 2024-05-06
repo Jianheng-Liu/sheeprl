@@ -19,8 +19,8 @@ The results are as follows:
 <div align="center">
   <table>
     <tr>
-      <td><img src="https://github.com/Brronnie/sheeprl/assets/exp/value_loss.png" width="200px"></td>
-      <td><img src="https://github.com/Brronnie/sheeprl/assets/exp/reward" width="200px"></td>
+      <td><img src="assets/exp/value_loss.png" width="200px"></td>
+      <td><img src="assets/exp/reward" width="200px"></td>
     </tr>
   </table>
 </div>
