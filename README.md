@@ -29,13 +29,13 @@ The results are as follows:
 where the dark blue curve is with grayscale images as input, the pink curve is with vector values as input and the light blue curve is with both as input.
 
 The agent can move forward as:
-<p align="center">
+<div align="center">
   <table>
     <tr>
-      <td><img src="assets/exp/vector.gif" width="120" /><br>Vector Values Input</td>
-      <td><img src="assets/exp/grayscale.gif" width="120" /><br>Grayscale Images Input</td>
-      <td><img src="assets/exp/both.gif" width="120" /><br>Both Input</td>
+      <td><img src="assets/exp/vector.gif" width="200px" /><br>Vector Values Input</td>
+      <td><img src="assets/exp/grayscale.gif" width="200px" /><br>Grayscale Images Input</td>
+      <td><img src="assets/exp/both.gif" width="200px" /><br>Both Input</td>
     </tr>
   </table>
-</p>
+</div>
 None of the algorithms have fully converged, and it is expected to take more than 24 hours of training if they are to fully converge.
