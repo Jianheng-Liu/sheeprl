@@ -21,8 +21,9 @@ The results are as follows:
 <div align="center">
   <table>
     <tr>
-      <td><img src="assets/exp/value_loss.png" width="400px"></td>
-      <td><img src="assets/exp/reward.png" width="400px"></td>
+      <td><img src="assets/exp/value_loss.png" width="300px"></td>
+      <td><img src="assets/exp/world_model_loss.png" width="300px"></td>
+      <td><img src="assets/exp/reward.png" width="300px"></td>
     </tr>
   </table>
 </div>
