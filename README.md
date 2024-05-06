@@ -32,10 +32,10 @@ The agent can move forward as:
 <p align="center">
   <table>
     <tr>
-      <td><img src="assets/exp/vector.gif" width="300" /><br>Vector Values Input</td>
-      <td><img src="assets/exp/grayscale.gif" width="300" /><br>Grayscale Images Input</td>
-      <td><img src="assets/exp/both.gif" width="300" /><br>Both Input</td>
+      <td><img src="assets/exp/vector.gif" width="120" /><br>Vector Values Input</td>
+      <td><img src="assets/exp/grayscale.gif" width="120" /><br>Grayscale Images Input</td>
+      <td><img src="assets/exp/both.gif" width="120" /><br>Both Input</td>
     </tr>
   </table>
 </p>
-
+None of the algorithms have fully converged, and it is expected to take more than 24 hours of training if they are to fully converge.
