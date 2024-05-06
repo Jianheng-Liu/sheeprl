@@ -13,5 +13,14 @@ The algorithm is dreamer v3 and the environment is the walker from the Deepmind 
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_vector
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale_vector
+│   ├── exp_dreamer_v3_dmc.ipynb
 ```
 The results are as follows:
+<div align="center">
+  <table>
+    <tr>
+      <td><img src="https://github.com/Brronnie/sheeprl/assets/exp/value_loss.png" width="200px"></td>
+      <td><img src="https://github.com/Brronnie/sheeprl/assets/exp/reward" width="200px"></td>
+    </tr>
+  </table>
+</div>
