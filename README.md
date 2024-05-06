@@ -15,6 +15,8 @@ The algorithm is dreamer v3 and the environment is the walker from the Deepmind 
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale_vector
 │   ├── exp_dreamer_v3_dmc.ipynb
 ```
+In each experiment setting, the agent is trained for about 6 hours on my computer with RTX 2080.
+
 The results are as follows:
 <div align="center">
   <table>
