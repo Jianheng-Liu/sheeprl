@@ -4,7 +4,7 @@ This repository is forked from [sheeprl](https://github.com/Eclectic-Sheep/sheep
 
 ## Input Experiments
 
-The algorithm is dreamer v3 and the environment is the walker from the Deepmind control suite. The configuration files I added are as follows, which contain the configurations for 3 different input: grayscale image, vector value, and both.
+The algorithm is dreamer v3 and the environment is the walker from the Deepmind control suite. The configuration files I added are as follows, which contain the configurations for 3 different input: grayscale images, vector values, and both.
 ```
 ├── sheeprl
 │   ├── sheeprl
@@ -24,3 +24,4 @@ The results are as follows:
     </tr>
   </table>
 </div>
+where the dark blue curve is with grayscale images as input, the pink curve is with vector values as input and the light blue curve is using both as input.
