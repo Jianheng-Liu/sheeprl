@@ -38,4 +38,4 @@ The agent can move forward as:
     </tr>
   </table>
 </div>
-None of the algorithms have fully converged, and it is expected to take more than 24 hours of training if they are to fully converge.
+None of the algorithms have fully converged, and it is expected to take more than 24 hours of training for each if they are to fully converge.
