@@ -24,4 +24,4 @@ The results are as follows:
     </tr>
   </table>
 </div>
-where the dark blue curve is with grayscale images as input, the pink curve is with vector values as input and the light blue curve is using both as input.
+where the dark blue curve is with grayscale images as input, the pink curve is with vector values as input and the light blue curve is with both as input.
