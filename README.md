@@ -56,3 +56,4 @@ The following files are created to add new input to the DMC environment:
 │   │   ├── envs
 │   │   │   ├── dmc_extended.py
 ```
+The newly introduced input consists of the following 3: a random noise picture, a random scalar value, and the sum of the first values of the original image input and the scalar input.
