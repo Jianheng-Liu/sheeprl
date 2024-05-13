@@ -68,3 +68,14 @@ The decoder inputs in the Input Experiments above were configured incorrectly, t
 │   │   │   ├── exp
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale_vector_modified.yaml
 ```
+The results are as follows:
+<div align="center">
+  <table>
+    <tr>
+      <td><img src="assets/exp/value_loss_1.png" width="300px"></td>
+      <td><img src="assets/exp/world_model_loss_1.png" width="300px"></td>
+      <td><img src="assets/exp/reward_1.png" width="300px"></td>
+    </tr>
+  </table>
+</div>
+where the light blue curve is with grayscale images and vector values as encoder input but with incorrect decoder input, the purple curve is with with grayscale images and vector values as encoder input and with default laten representations as decoder input.
