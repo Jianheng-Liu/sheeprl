@@ -41,7 +41,7 @@ The agent can move forward as:
 </div>
 None of the algorithms have fully converged, and it is expected to take more than 24 hours of training for each if they are to fully converge.
 
-## Add New Input
+## Attempt to Add New Input
 
 The following files are created to add new input to the DMC environment:
 ```
@@ -57,3 +57,14 @@ The following files are created to add new input to the DMC environment:
 │   │   │   ├── dmc_extended.py
 ```
 The newly introduced input consists of the following 3: a random noise picture, a random scalar value, and the sum of the first values of the original image input and the scalar input.
+
+## Decoder Input Experiment
+The decoder inputs in the Input Experiments above were configured incorrectly, to fix this, configure the decoder inputs to the default latent representations in the following file:
+```
+├── sheeprl
+│   ├── exp_dreamer_v3_dmc.ipynb
+│   ├── sheeprl
+│   │   ├── configs
+│   │   │   ├── exp
+│   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale_vector_modified.yaml
+```
