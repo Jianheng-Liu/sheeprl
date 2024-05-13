@@ -7,13 +7,13 @@ This repository is forked from [sheeprl](https://github.com/Eclectic-Sheep/sheep
 The algorithm is dreamer v3 and the environment is the walker from the Deepmind control suite. The configuration files I added are as follows, which contain the configurations for 3 different input: grayscale images, vector values, and both.
 ```
 ├── sheeprl
+│   ├── exp_dreamer_v3_dmc.ipynb
 │   ├── sheeprl
 │   │   ├── configs
 │   │   │   ├── exp
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_vector.yaml
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale.yaml
 │   │   │   │   ├── dreamer_v3_dmc_walker_walk_grayscale_vector.yaml
-│   ├── exp_dreamer_v3_dmc.ipynb
 ```
 In each experiment setting, the agent is trained for about 6 hours on my computer with RTX 2080.
 
@@ -40,3 +40,19 @@ The agent can move forward as:
   </table>
 </div>
 None of the algorithms have fully converged, and it is expected to take more than 24 hours of training for each if they are to fully converge.
+
+## Add New Input
+
+The following files are created to add new input to the DMC environment:
+```
+├── sheeprl
+│   ├── exp_dreamer_v3_dmc_extended.ipynb
+│   ├── sheeprl
+│   │   ├── configs
+│   │   │   ├── env
+│   │   │   │   ├── dmc_extended.yaml
+│   │   │   ├── exp
+│   │   │   │   ├── dreamer_v3_dmc_walk_walk_extended.yaml
+│   │   ├── envs
+│   │   │   ├── dmc_extended.py
+```
