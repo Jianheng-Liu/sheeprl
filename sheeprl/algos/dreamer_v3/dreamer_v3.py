@@ -378,6 +378,29 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     fabric.print(f"Log dir: {log_dir}")
 
     # Environment setup
+    # ==================== isaac sim initializing
+    #launch Isaac Sim before any other imports
+    #default first two lines in any standalone application
+    # print("trying to import the isaac modules")
+    from omni.isaac.core import World
+    from omni.isaac.core.objects import DynamicCuboid
+    # simulation_app = SimulationApp({"headless": False}) # we can also run as headless.
+    world = World()
+   
+    world.scene.add_default_ground_plane()
+    fancy_cube =  world.scene.add(
+        DynamicCuboid(
+            prim_path="/World/random_cube",
+            name="fancy_cube",
+            position=np.array([0, 0, 1.0]),
+            scale=np.array([0.5015, 0.5015, 0.5015]),
+            color=np.array([0, 0, 1.0]),
+        ))
+    # Resetting the world needs to be called before querying anything related to an articulation specifically.
+    # Its recommended to always do a reset after adding your assets, for physics handles to be propagated properly
+    world.reset()
+    # ====================
+
     vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
     envs = vectorized_env(
         [
@@ -585,6 +608,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 next_obs, rewards, terminated, truncated, infos = envs.step(
                     real_actions.reshape(envs.action_space.shape)
                 )
+                # ==================== isaac sim stepping
+                world.step(render=True) # execute one physics step and one rendering step
+                # envs.pretstep() # compoute observations
+                # ===============================================
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])

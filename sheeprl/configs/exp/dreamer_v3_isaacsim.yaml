@@ -3,7 +3,7 @@
 defaults:
   - dreamer_v3
   - override /algo: dreamer_v3_S
-  - override /env: dmc_256
+  - override /env: isaacsim
   - _self_
 
 # Experiment
@@ -11,14 +11,12 @@ seed: 5
 
 # Environment
 env:
-  num_envs: 4
-  action_repeat: 2
+  num_envs: 1
+  action_repeat: 1
   max_episode_steps: -1
   wrapper:
-    domain_name: walker
-    task_name: walk
-    from_vectors: False
-    from_pixels: True
+    map_size: [84, 84]
+    rgb_size: [84, 84]
 
 # Checkpoint
 checkpoint:
@@ -36,28 +34,21 @@ algo:
   total_steps: 500_000
   cnn_keys:
     encoder:
-      - rgb
-      - camera_rgb
-      - camera_depth
+      - local_map
+      - rgb_image
+    decoder:
+      - local_map
   mlp_keys:
-    encoder: []
+    encoder:
+      - position
   learning_starts: 1000
   replay_ratio: 0.5
 
 # Metric
 metric:
   log_level: 0
-  log_every: 100
+  log_every: 1000
 
 fabric:
   accelerator: cuda
   precision: bf16-mixed
-  # precision: None
-  # plugins:
-  #   - _target_: lightning.fabric.plugins.precision.MixedPrecision
-  #     precision: 16-mixed
-  #     device: cuda
-  #     scaler:
-  #       _target_: torch.cuda.amp.GradScaler
-  #       init_scale: 1e4
-  #       growth_interval: 1000
