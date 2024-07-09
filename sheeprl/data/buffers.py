@@ -463,6 +463,32 @@ class SequentialReplayBuffer(ReplayBuffer):
         return self._get_samples(
             idxes, batch_size, n_samples, sequence_length, sample_next_obs=sample_next_obs, clone=clone
         )
+    
+    def sample_latest_sequence(
+        self,
+        sequence_length: int,
+        sample_next_obs: bool = False,
+        clone: bool = False,
+    ) -> Dict[str, np.ndarray]:
+        """
+        Sample the latest sequence of elements from the replay buffer for each environment.
+
+        Args:
+            sequence_length (int): the length of the sequence of each element.
+            clone (bool): whether to clone the sampled tensors.
+
+        Returns:
+            Dict[str, np.ndarray]: the sampled dictionary with a shape of [1, sequence_length, n_envs, ...].
+        """
+        if sequence_length > self.__len__():
+            raise ValueError(
+                f"The sequence length ({sequence_length}) is greater than the buffer size ({self.__len__()})"
+            )
+        
+        idxes = np.arange(self._pos - sequence_length, self._pos).reshape(1, -1) % self.buffer_size
+        return self._get_samples(
+            idxes, batch_size=self._n_envs, n_samples=1, sequence_length=sequence_length, sample_next_obs=sample_next_obs, clone=clone
+        )
 
     def _get_samples(
         self,
@@ -741,6 +767,21 @@ class EnvIndependentReplayBuffer:
         return {
             k: get_tensor(v, dtype=dtype, clone=clone, device=device, from_numpy=from_numpy) for k, v in samples.items()
         }
+    
+    def sample_latest_sequence(
+        self,
+        sequence_length: int,
+        sample_next_obs: bool = False,
+        clone: bool = False,
+    ) -> Dict[str, np.ndarray]:
+        samples_per_env = [
+            b.sample_latest_sequence(sequence_length, sample_next_obs=sample_next_obs, clone=clone)
+            for b in self._buf
+        ]
+        samples = {}
+        for k in samples_per_env[0].keys():
+            samples[k] = np.concatenate([s[k] for s in samples_per_env], axis=self._concat_along_axis)
+        return samples
 
 
 class EpisodeBuffer:

@@ -44,6 +44,110 @@ from sheeprl.utils.utils import Ratio, save_configs
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
 
+def imagine(
+    fabric: Fabric,
+    world_model: WorldModel,
+    actor: _FabricModule,
+    sequence_data: Dict[str, Tensor],
+    horizon: int,
+    action_space,
+    cfg: Dict[str, Any],
+) -> Dict[str, Tensor]:
+    """
+    Imagine trajectories in the latent space and reconstruct observations.
+
+    Args:
+        fabric (Fabric): the fabric instance.
+        world_model (WorldModel): the world model instance.
+        actor (_FabricModule): the actor model.
+        sequence_data (Dict[str, Tensor]): the latest sequence tensors containing observations, actions, is_first, etc.
+        horizon (int): the number of steps to imagine.
+        action_space: the action space of the environment to get the action dimension.
+        cfg (Dict[str, Any]): the configuration dictionary.
+        
+    Returns:
+        Dict[str, Tensor]: the reconstructed observations.
+    """
+    device = fabric.device
+    batch_size = sequence_data['actions'].size(1)
+    sequence_length = sequence_data['actions'].size(0)
+    recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
+    stochastic_size = cfg.algo.world_model.stochastic_size
+    discrete_size = cfg.algo.world_model.discrete_size
+    stoch_state_size = stochastic_size * discrete_size
+
+    # Determine action dimension based on action space
+    if hasattr(action_space, 'n'):
+        action_dim = action_space.n
+    else:
+        action_dim = np.prod(action_space.shape)
+
+    # Prepare observations and actions
+    batch_obs = {k: sequence_data[k] / 255.0 - 0.5 for k in cfg.algo.cnn_keys.encoder}
+    batch_obs.update({k: sequence_data[k] for k in cfg.algo.mlp_keys.encoder})
+    batch_actions = torch.cat((torch.zeros_like(sequence_data["actions"][:1]), sequence_data["actions"][:-1]), dim=0)
+    is_first = sequence_data["is_first"]
+
+    # Initialize states
+    recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
+    posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
+    recurrent_states = torch.empty(sequence_length, batch_size, recurrent_state_size, device=device)
+    posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
+
+    # Embed observations
+    embedded_obs = world_model.encoder(batch_obs)
+
+    # Get latent state (code taken from dynamic learning)
+    for i in range(sequence_length):
+        recurrent_state, posterior, _, _, _ = world_model.rssm.dynamic(
+            posterior,
+            recurrent_state,
+            batch_actions[i : i + 1],
+            embedded_obs[i : i + 1],
+            is_first[i : i + 1],
+        )
+        recurrent_states[i] = recurrent_state
+        posteriors[i] = posterior
+
+    # Start imagination from the latest state
+    imagined_prior = posteriors[-1].detach().reshape(1, batch_size, stoch_state_size)
+    recurrent_state = recurrent_states[-1].detach().reshape(1, batch_size, recurrent_state_size)
+    imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+
+    # Initialize tensors for imagined trajectories and actions
+    imagined_trajectories = torch.empty(
+        horizon + 1,
+        batch_size,
+        stoch_state_size + recurrent_state_size,
+        device=device,
+    )
+    imagined_trajectories[0] = imagined_latent_state
+    
+    imagined_actions = torch.empty(
+        horizon + 1,
+        batch_size,
+        action_dim,
+        device=device,
+    )
+    
+    actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+    imagined_actions[0] = actions
+
+    # Imagine trajectories in the latent space
+    for i in range(1, horizon + 1):
+        imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
+        imagined_prior = imagined_prior.view(1, batch_size, stoch_state_size)
+        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+        imagined_trajectories[i] = imagined_latent_state
+        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+        imagined_actions[i] = actions
+
+    # Compute the final reconstructed observations
+    imagined_trajectories = imagined_trajectories.view(-1, stoch_state_size + recurrent_state_size)
+    reconstructed_obs = world_model.observation_model(imagined_trajectories)
+
+    return reconstructed_obs, imagined_actions
+
 
 def train(
     fabric: Fabric,
@@ -589,6 +693,26 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             axis=-1,
                         )
                 else:
+                    # Sample latest sequence from replay buffer
+                    latest_sequence = rb.sample_latest_sequence(sequence_length=cfg.algo.per_rank_sequence_length)
+                    latest_sequence_tensors = {k: torch.tensor(v, device=fabric.device) for k, v in latest_sequence.items()}
+                    sequence_data = {k: v[i].float() for k, v in latest_sequence_tensors.items()}
+                    imagination_horizon = 10
+
+                    # Run imagine function
+                    imagined_observations, imagined_actions = imagine(
+                        fabric,
+                        world_model,
+                        actor,
+                        sequence_data,
+                        imagination_horizon,
+                        envs.single_action_space,
+                        cfg,
+                    )
+
+                    print('Imagined Observations', imagined_observations)
+                    print('Imagined Actions: ', imagined_actions)
+
                     torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
