@@ -24,7 +24,7 @@ class IsaacSimWrapper(gym.Wrapper):
             "rgb_image": spaces.Box(low=0, high=255, shape=(*rgb_size, 3), dtype=np.uint8)
         })
 
-        self._action_space = spaces.Discrete(4)  # 0: forward, 1: rotate left, 2: rotate right, 3: no movement
+        self._action_space = spaces.Discrete(4)  # One-hot, 0: forward, 1: rotate left, 2: rotate right, 3: no movement
         self._reward_range = (-np.inf, np.inf)
         
         # Set random seed if provided

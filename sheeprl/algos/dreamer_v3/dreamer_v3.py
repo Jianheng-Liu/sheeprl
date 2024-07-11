@@ -44,37 +44,43 @@ from sheeprl.utils.utils import Ratio, save_configs
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
 
+# ==================== imagine ====================
+import imageio
+import numpy as np
+
+
 def imagine(
     fabric: Fabric,
     world_model: WorldModel,
     actor: _FabricModule,
-    sequence_data: Dict[str, Tensor],
+    stochastic_state: torch.Tensor,
+    recurrent_state: torch.Tensor,
     horizon: int,
     action_space,
     cfg: Dict[str, Any],
-) -> Dict[str, Tensor]:
+) -> Tuple[Dict[str, np.ndarray], np.ndarray]:
     """
     Imagine trajectories in the latent space and reconstruct observations.
+    (For Now Only Support For env: num_envs: 1)
 
     Args:
         fabric (Fabric): the fabric instance.
         world_model (WorldModel): the world model instance.
         actor (_FabricModule): the actor model.
-        sequence_data (Dict[str, Tensor]): the latest sequence tensors containing observations, actions, is_first, etc.
+        stochastic_state (torch.Tensor): the initial stochastic state.
+        recurrent_state (torch.Tensor): the initial recurrent state.
         horizon (int): the number of steps to imagine.
         action_space: the action space of the environment to get the action dimension.
         cfg (Dict[str, Any]): the configuration dictionary.
         
     Returns:
-        Dict[str, Tensor]: the reconstructed observations.
+        Dict[str, np.ndarray]: the reconstructed observations.
+        np.ndarray: the imagined actions.
     """
     device = fabric.device
-    batch_size = sequence_data['actions'].size(1)
-    sequence_length = sequence_data['actions'].size(0)
-    recurrent_state_size = cfg.algo.world_model.recurrent_model.recurrent_state_size
-    stochastic_size = cfg.algo.world_model.stochastic_size
-    discrete_size = cfg.algo.world_model.discrete_size
-    stoch_state_size = stochastic_size * discrete_size
+    batch_size = stochastic_state.size(1)
+    stoch_state_size = stochastic_state.size(-1)
+    recurrent_state_size = recurrent_state.size(-1)
 
     # Determine action dimension based on action space
     if hasattr(action_space, 'n'):
@@ -82,71 +88,76 @@ def imagine(
     else:
         action_dim = np.prod(action_space.shape)
 
-    # Prepare observations and actions
-    batch_obs = {k: sequence_data[k] / 255.0 - 0.5 for k in cfg.algo.cnn_keys.encoder}
-    batch_obs.update({k: sequence_data[k] for k in cfg.algo.mlp_keys.encoder})
-    batch_actions = torch.cat((torch.zeros_like(sequence_data["actions"][:1]), sequence_data["actions"][:-1]), dim=0)
-    is_first = sequence_data["is_first"]
-
-    # Initialize states
-    recurrent_state = torch.zeros(1, batch_size, recurrent_state_size, device=device)
-    posterior = torch.zeros(1, batch_size, stochastic_size, discrete_size, device=device)
-    recurrent_states = torch.empty(sequence_length, batch_size, recurrent_state_size, device=device)
-    posteriors = torch.empty(sequence_length, batch_size, stochastic_size, discrete_size, device=device)
-
-    # Embed observations
-    embedded_obs = world_model.encoder(batch_obs)
-
-    # Get latent state (code taken from dynamic learning)
-    for i in range(sequence_length):
-        recurrent_state, posterior, _, _, _ = world_model.rssm.dynamic(
-            posterior,
-            recurrent_state,
-            batch_actions[i : i + 1],
-            embedded_obs[i : i + 1],
-            is_first[i : i + 1],
-        )
-        recurrent_states[i] = recurrent_state
-        posteriors[i] = posterior
-
-    # Start imagination from the latest state
-    imagined_prior = posteriors[-1].detach().reshape(1, batch_size, stoch_state_size)
-    recurrent_state = recurrent_states[-1].detach().reshape(1, batch_size, recurrent_state_size)
-    imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
+    imagined_latent_states = torch.cat((stochastic_state, recurrent_state), -1)
 
     # Initialize tensors for imagined trajectories and actions
     imagined_trajectories = torch.empty(
-        horizon + 1,
+        horizon,
         batch_size,
         stoch_state_size + recurrent_state_size,
         device=device,
     )
-    imagined_trajectories[0] = imagined_latent_state
-    
+
     imagined_actions = torch.empty(
-        horizon + 1,
+        horizon,
         batch_size,
         action_dim,
         device=device,
     )
-    
-    actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
-    imagined_actions[0] = actions
 
     # Imagine trajectories in the latent space
-    for i in range(1, horizon + 1):
-        imagined_prior, recurrent_state = world_model.rssm.imagination(imagined_prior, recurrent_state, actions)
-        imagined_prior = imagined_prior.view(1, batch_size, stoch_state_size)
-        imagined_latent_state = torch.cat((imagined_prior, recurrent_state), -1)
-        imagined_trajectories[i] = imagined_latent_state
-        actions = torch.cat(actor(imagined_latent_state.detach())[0], dim=-1)
+    for i in range(horizon):
+        actions = torch.cat(actor(imagined_latent_states.detach())[0], dim=-1)
         imagined_actions[i] = actions
+        imagined_prior, recurrent_state = world_model.rssm.imagination(stochastic_state, recurrent_state, actions)
+        imagined_prior = imagined_prior.view(1, batch_size, stoch_state_size)
+        imagined_latent_states = torch.cat((imagined_prior, recurrent_state), -1)
+        imagined_trajectories[i] = imagined_latent_states
 
     # Compute the final reconstructed observations
     imagined_trajectories = imagined_trajectories.view(-1, stoch_state_size + recurrent_state_size)
     reconstructed_obs = world_model.observation_model(imagined_trajectories)
 
-    return reconstructed_obs, imagined_actions
+    # Convert tensors to numpy arrays and reverse normalization
+    reconstructed_obs_np = {}
+    for k in cfg.algo.cnn_keys.decoder:
+        reconstructed_obs_np[k] = (reconstructed_obs[k].cpu().numpy() + 0.5) * 255.0
+        reconstructed_obs_np[k] = np.clip(reconstructed_obs_np[k], 0, 255).astype(np.uint8)
+    for k in cfg.algo.mlp_keys.decoder:
+        reconstructed_obs_np[k] = reconstructed_obs[k].cpu().numpy()
+
+    imagined_actions_np = imagined_actions.cpu().numpy()
+
+    return reconstructed_obs_np, imagined_actions_np
+
+
+def save_as_gif(reconstructed_obs_np: Dict[str, np.ndarray], key: str, output_path: str, duration: float = 0.1):
+    """
+    Save the specified observation from reconstructed_obs_np as a gif.
+
+    Args:
+        reconstructed_obs_np (Dict[str, np.ndarray]): The reconstructed observations as a dictionary of numpy arrays.
+        key (str): The key for the observation to save as a gif.
+        output_path (str): The output path for the gif.
+        duration (float): Duration of each frame in the gif.
+    """
+    if key not in reconstructed_obs_np:
+        print(f"Key '{key}' not found in the reconstructed observations.")
+        return
+
+    observation = reconstructed_obs_np[key]
+
+    # Assuming observation shape is (horizon, channels, height, width)
+    # We need to transpose it to (horizon, height, width, channels) for imageio
+    observation = observation.transpose(0, 2, 3, 1)
+
+    # Convert observation to list of images
+    images = [observation[i] for i in range(observation.shape[0])]
+
+    # Save as gif
+    imageio.mimsave(output_path, images, duration=duration)
+    print(f"Saved gif to {output_path}")
+# ==================== imagine ====================
 
 
 def train(
@@ -487,19 +498,11 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     #default first two lines in any standalone application
     # print("trying to import the isaac modules")
     from omni.isaac.core import World
-    from omni.isaac.core.objects import DynamicCuboid
+    from omni.isaac.core.utils.stage import open_stage
+
     # simulation_app = SimulationApp({"headless": False}) # we can also run as headless.
+    open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_02.usd')
     world = World()
-   
-    world.scene.add_default_ground_plane()
-    fancy_cube =  world.scene.add(
-        DynamicCuboid(
-            prim_path="/World/random_cube",
-            name="fancy_cube",
-            position=np.array([0, 0, 1.0]),
-            scale=np.array([0.5015, 0.5015, 0.5015]),
-            color=np.array([0, 0, 1.0]),
-        ))
     # Resetting the world needs to be called before querying anything related to an articulation specifically.
     # Its recommended to always do a reset after adding your assets, for physics handles to be propagated properly
     world.reset()
@@ -693,26 +696,6 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             axis=-1,
                         )
                 else:
-                    # Sample latest sequence from replay buffer
-                    latest_sequence = rb.sample_latest_sequence(sequence_length=cfg.algo.per_rank_sequence_length)
-                    latest_sequence_tensors = {k: torch.tensor(v, device=fabric.device) for k, v in latest_sequence.items()}
-                    sequence_data = {k: v[i].float() for k, v in latest_sequence_tensors.items()}
-                    imagination_horizon = 10
-
-                    # Run imagine function
-                    imagined_observations, imagined_actions = imagine(
-                        fabric,
-                        world_model,
-                        actor,
-                        sequence_data,
-                        imagination_horizon,
-                        envs.single_action_space,
-                        cfg,
-                    )
-
-                    print('Imagined Observations', imagined_observations)
-                    print('Imagined Actions: ', imagined_actions)
-
                     torch_obs = prepare_obs(fabric, obs, cnn_keys=cfg.algo.cnn_keys.encoder, num_envs=cfg.env.num_envs)
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
@@ -732,10 +715,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 next_obs, rewards, terminated, truncated, infos = envs.step(
                     real_actions.reshape(envs.action_space.shape)
                 )
-                # ==================== isaac sim stepping
+                # ==================== isaac sim stepping ====================
                 world.step(render=True) # execute one physics step and one rendering step
                 # envs.pretstep() # compoute observations
-                # ===============================================
+                # ==================== isaac sim stepping ====================
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])
@@ -802,6 +785,51 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 step_data["truncated"][:, dones_idxes] = np.zeros_like(step_data["truncated"][:, dones_idxes])
                 step_data["is_first"][:, dones_idxes] = np.ones_like(step_data["is_first"][:, dones_idxes])
                 player.init_states(dones_idxes)
+
+            # ==================== imagine ====================
+            # Example Usage
+            # check_iteration = 10000
+            # imagination_horizon = 32
+
+            # if policy_step == check_iteration - imagination_horizon:
+            #     print('Reach policy_step: ', policy_step)
+            #     imagination_stochastic_state = player.stochastic_state.clone()
+            #     imagination_recurrent_state = player.recurrent_state.clone()
+                
+            #     # Run imagine function
+            #     imagined_observations, imagined_actions = imagine(
+            #         fabric,
+            #         world_model,
+            #         actor,
+            #         imagination_stochastic_state,
+            #         imagination_recurrent_state,
+            #         imagination_horizon,
+            #         envs.single_action_space,
+            #         cfg,
+            #     )
+
+            #     # Save RGB observations as gif
+            #     print('Saved as gif')
+            #     output_path_imagined = "imagined_observations.gif"
+            #     save_as_gif(imagined_observations, "rgb", output_path_imagined, duration=0.1)
+
+            # elif policy_step == check_iteration:
+            #     # Get the latest observations from the replay buffer using sample_latest_sequence
+            #     latest_sequence = rb.sample_latest_sequence(imagination_horizon)
+
+            #     # Process latest observations
+            #     latest_observations = {}
+            #     for k in cfg.algo.cnn_keys.encoder:
+            #         latest_observations[k] = latest_sequence[k]
+
+            #     latest_observations['rgb'] = latest_observations['rgb'][0, :, 0, :, :, :]
+            #     latest_observations['rgb'] = np.clip(latest_observations['rgb'], 0, 255).astype(np.uint8)
+
+            #     # Save as gif
+            #     print('Saved as gif')
+            #     output_path_true = "true_observations.gif"
+            #     save_as_gif(latest_observations, "rgb", output_path_true, duration=0.1)
+            # ==================== imagine ====================
 
         # Train the agent
         if update >= learning_starts:

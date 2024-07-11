@@ -11,6 +11,6 @@ sync_env: True
 # Wrapper to be instantiated
 wrapper:
   _target_: sheeprl.envs.isaacsim.IsaacSimWrapper
-  map_size: [84, 84]
-  rgb_size: [84, 84]
+  map_size: [128, 128]
+  rgb_size: [128, 128]
   seed: null
