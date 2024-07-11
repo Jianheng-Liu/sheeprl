@@ -1,6 +1,6 @@
 # Actively Predicting the Future
 
-## Method: image()
+## Method: imagine()
 
 The method takes the current latent state as input and imagine the future actions and observations iteratively. 
 ```
@@ -8,7 +8,7 @@ The method takes the current latent state as input and imagine the future action
 │   ├── sheeprl
 │   │   ├── algos
 │   │   │   ├── dreamer_v3
-│   │   │   │   ├── dreamer_v3.py -> image()
+│   │   │   │   ├── dreamer_v3.py -> imagine()
 ```
 To test this method, I train a DreamerV3 model for 45 mins (10000 policy steps) on the walker task of deepmind control suite, the predicted observations are as follows:
 

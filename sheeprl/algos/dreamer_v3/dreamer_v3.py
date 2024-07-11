@@ -48,13 +48,13 @@ from sheeprl.utils.utils import Ratio, save_configs
 import imageio
 import numpy as np
 
-
 def imagine(
     fabric: Fabric,
     world_model: WorldModel,
     actor: _FabricModule,
     stochastic_state: torch.Tensor,
     recurrent_state: torch.Tensor,
+    actions: torch.Tensor,
     horizon: int,
     action_space,
     cfg: Dict[str, Any],
@@ -69,6 +69,7 @@ def imagine(
         actor (_FabricModule): the actor model.
         stochastic_state (torch.Tensor): the initial stochastic state.
         recurrent_state (torch.Tensor): the initial recurrent state.
+        actions (torch.Tensor): the action gonna take.
         horizon (int): the number of steps to imagine.
         action_space: the action space of the environment to get the action dimension.
         cfg (Dict[str, Any]): the configuration dictionary.
@@ -107,12 +108,12 @@ def imagine(
 
     # Imagine trajectories in the latent space
     for i in range(horizon):
-        actions = torch.cat(actor(imagined_latent_states.detach())[0], dim=-1)
-        imagined_actions[i] = actions
         imagined_prior, recurrent_state = world_model.rssm.imagination(stochastic_state, recurrent_state, actions)
         imagined_prior = imagined_prior.view(1, batch_size, stoch_state_size)
         imagined_latent_states = torch.cat((imagined_prior, recurrent_state), -1)
         imagined_trajectories[i] = imagined_latent_states
+        actions = torch.cat(actor(imagined_latent_states.detach())[0], dim=-1)
+        imagined_actions[i] = actions
 
     # Compute the final reconstructed observations
     imagined_trajectories = imagined_trajectories.view(-1, stoch_state_size + recurrent_state_size)
@@ -795,6 +796,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             #     print('Reach policy_step: ', policy_step)
             #     imagination_stochastic_state = player.stochastic_state.clone()
             #     imagination_recurrent_state = player.recurrent_state.clone()
+
+            #     # actions to take
+            #     imagined_latent_states = torch.cat((imagination_stochastic_state, imagination_recurrent_state), -1)
+            #     actions_to_take = torch.cat(actor(imagined_latent_states.detach())[0], dim=-1) # can take any specific action
                 
             #     # Run imagine function
             #     imagined_observations, imagined_actions = imagine(
@@ -803,6 +808,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             #         actor,
             #         imagination_stochastic_state,
             #         imagination_recurrent_state,
+            #         actions_to_take,
             #         imagination_horizon,
             #         envs.single_action_space,
             #         cfg,
