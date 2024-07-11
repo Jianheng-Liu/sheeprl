@@ -1,14 +1,7 @@
-from omni.isaac.kit import SimulationApp
-simulation_app = SimulationApp({"headless": False})
-
 import numpy as np
-import matplotlib.pyplot as plt
 from pxr import Usd, UsdGeom
 
-from omni.isaac.core import World
-from omni.isaac.core.utils.stage import open_stage
-
-def generate_occupancy_map(world, map_size=(128, 128), resolution=0.25, offset=(26.5, 0.5, 0.0), keywords_to_check=["RackPile"]):
+def map_generation(world, map_size=(128, 128), resolution=0.25, offset=(26.5, 0.5, 0.0), keywords_to_check=["RackPile"]):
     """
     Generate an occupancy map from the given world.
 
@@ -71,36 +64,49 @@ def generate_occupancy_map(world, map_size=(128, 128), resolution=0.25, offset=(
 
     return occupancy_map
 
-# Initialize and open the USD stage
-open_stage(usd_path='Warehouse_02.usd')
-world = World()
 
-world.reset()
+# ======================= Example Usage ==================================
+# from omni.isaac.kit import SimulationApp
+# simulation_app = SimulationApp({"headless": False})
 
-# Generate the occupancy map
-keywords_to_check=[
-    'RackPile', 
-    'RackLong', 
-    'Forklift', 
-    'Table', 
-    'IndustrialSteelShelving', 
-    'WallA', 
-    'RackShelf', 
-    'RackFrame', 
-    'RackShield',
-    'PaletteA',
-    'EmergencyBoardFull',
-    'FuseBox',
-    ]
-occupancy_map = generate_occupancy_map(world=world, keywords_to_check=keywords_to_check)
+# from map_generation import map_generation
+# import matplotlib.pyplot as plt
 
-# Display the occupancy map using matplotlib
-plt.imshow(occupancy_map, cmap='gray')
-plt.title("Occupancy Map")
-plt.show()
+# from omni.isaac.core import World
+# from omni.isaac.core.utils.stage import open_stage
 
-# Keep the simulation running
-while True:
-    world.step()
+# # Initialize and open the USD stage
+# open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_01.usd')
+# world = World()
 
-simulation_app.close()
+# world.reset()
+
+# # Generate the occupancy map
+# keywords_to_check=[
+#     'RackPile', 
+#     'RackLong', 
+#     'Forklift', 
+#     'Table', 
+#     'IndustrialSteelShelving', 
+#     'WallA', 
+#     'RackShelf', 
+#     'RackFrame', 
+#     'RackShield',
+#     'PaletteA',
+#     'EmergencyBoardFull',
+#     'FuseBox',
+#     ]
+# occupancy_map = map_generation(world=world, keywords_to_check=keywords_to_check)
+
+# # Display the occupancy map using matplotlib
+# plt.imshow(occupancy_map, cmap='gray', origin='lower')
+# plt.title("Occupancy Map")
+# plt.show()
+
+# # Keep the simulation running
+# while True:
+#     world.step()
+
+# simulation_app.close()
+
+# ======================= Example Usage ==================================
