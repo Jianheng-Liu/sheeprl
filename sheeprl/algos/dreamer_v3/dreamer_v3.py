@@ -47,6 +47,7 @@ from sheeprl.utils.utils import Ratio, save_configs
 # ==================== imagine ====================
 import imageio
 import numpy as np
+from torch.utils.tensorboard import SummaryWriter
 
 def imagine(
     fabric: Fabric,
@@ -122,17 +123,22 @@ def imagine(
     # Convert tensors to numpy arrays and reverse normalization
     reconstructed_obs_np = {}
     for k in cfg.algo.cnn_keys.decoder:
-        reconstructed_obs_np[k] = (reconstructed_obs[k].cpu().numpy() + 0.5) * 255.0
+        reconstructed_obs_np[k] = (reconstructed_obs[k].detach().cpu().numpy() + 0.5) * 255.0
         reconstructed_obs_np[k] = np.clip(reconstructed_obs_np[k], 0, 255).astype(np.uint8)
     for k in cfg.algo.mlp_keys.decoder:
-        reconstructed_obs_np[k] = reconstructed_obs[k].cpu().numpy()
+        reconstructed_obs_np[k] = reconstructed_obs[k].detach().cpu().numpy()
 
-    imagined_actions_np = imagined_actions.cpu().numpy()
+    imagined_actions_np = imagined_actions.detach().cpu().numpy()
 
     return reconstructed_obs_np, imagined_actions_np
 
 
-def save_as_gif(reconstructed_obs_np: Dict[str, np.ndarray], key: str, output_path: str, duration: float = 0.1):
+def save_as_gif(
+    reconstructed_obs_np: Dict[str, np.ndarray], 
+    key: str, 
+    output_path: str, 
+    duration: float = 0.1
+):
     """
     Save the specified observation from reconstructed_obs_np as a gif.
 
@@ -158,6 +164,80 @@ def save_as_gif(reconstructed_obs_np: Dict[str, np.ndarray], key: str, output_pa
     # Save as gif
     imageio.mimsave(output_path, images, duration=duration)
     print(f"Saved gif to {output_path}")
+
+
+def log_imagination_as_gif(
+    reconstructed_obs_np: Dict[str, np.ndarray],
+    key: str,
+    cfg: Dict[str, Any],
+    gif_name: str,
+    duration: float = 0.1,
+):
+    """
+    Log the specified observation from reconstructed_obs_np as a GIF to TensorBoard.
+
+    Args:
+        reconstructed_obs_np (Dict[str, np.ndarray]): The reconstructed observations as a dictionary of numpy arrays.
+        key (str): The key for the observation to save as a gif.
+        cfg (DictConfig): the configs.
+        gif_name (str): Name for the GIF and the tag in TensorBoard.
+        duration (float): Duration of each frame in the GIF.
+    """
+    log_dir = cfg.metric.logger.root_dir + '/' + cfg.metric.logger.name
+
+    if key not in reconstructed_obs_np:
+        print(f"Key '{key}' not found in the reconstructed observations.")
+        return
+
+    observation = reconstructed_obs_np[key]
+
+    # Assuming observation shape is (horizon, channels, height, width)
+
+    # Convert observation to tensor and add batch dimension
+    observation_tensor = torch.tensor(observation).unsqueeze(0)  # (1, horizon, height, width, channels)
+
+    # Log the video to TensorBoard
+    writer = SummaryWriter(log_dir=log_dir)
+    writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
+    writer.close()
+    print(f"Logged gif to TensorBoard at {log_dir}")
+
+
+def log_true_observation_as_gif(
+    true_obs_np: Dict[str, np.ndarray],
+    key: str,
+    cfg: Dict[str, Any],
+    gif_name: str,
+    duration: float = 0.1,
+):
+    """
+    Log the specified observation from true_obs_np as a GIF to TensorBoard.
+
+    Args:
+        true_obs_np (Dict[str, np.ndarray]): The reconstructed observations as a dictionary of numpy arrays.
+        key (str): The key for the observation to save as a gif.
+        cfg (DictConfig): the configs.
+        gif_name (str): Name for the GIF and the tag in TensorBoard.
+        duration (float): Duration of each frame in the GIF.
+    """
+    log_dir = cfg.metric.logger.root_dir + '/' + cfg.metric.logger.name
+
+    if key not in true_obs_np:
+        print(f"Key '{key}' not found in the reconstructed observations.")
+        return
+
+    observation = true_obs_np[key][0, :, 0, :, :, :]
+
+    # Assuming observation shape is (horizon, channels, height, width)
+
+    # Convert observation to tensor and add batch dimension
+    observation_tensor = torch.tensor(observation).unsqueeze(0)  # (1, horizon, height, width, channels)
+
+    # Log the video to TensorBoard
+    writer = SummaryWriter(log_dir=log_dir)
+    writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
+    writer.close()
+    print(f"Logged gif to TensorBoard at {log_dir}")
 # ==================== imagine ====================
 
 
@@ -494,20 +574,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     fabric.print(f"Log dir: {log_dir}")
 
     # Environment setup
-    # ==================== isaac sim initializing
-    #launch Isaac Sim before any other imports
-    #default first two lines in any standalone application
-    # print("trying to import the isaac modules")
+    # ==================== isaac sim initializing ====================
     from omni.isaac.core import World
     from omni.isaac.core.utils.stage import open_stage
 
-    # simulation_app = SimulationApp({"headless": False}) # we can also run as headless.
     open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_02.usd')
     world = World()
-    # Resetting the world needs to be called before querying anything related to an articulation specifically.
-    # Its recommended to always do a reset after adding your assets, for physics handles to be propagated properly
     world.reset()
-    # ====================
+    # ==================== isaac sim initializing ====================
 
     vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
     envs = vectorized_env(
@@ -716,6 +790,32 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 next_obs, rewards, terminated, truncated, infos = envs.step(
                     real_actions.reshape(envs.action_space.shape)
                 )
+                # === how we call isaac sim and integrate with dreamer
+                # here we need to manage the global map.
+                # base_global_map = None
+                # get the dynamic objexts positions and previous pos
+                # MAKE SURE TO SAVE PREVIOUS N POS OF OBJ
+
+                #update the base_global map with the position of each obj
+                # and their previous n positions
+                # These will need to be differnt values
+
+                # for env in envs:
+                #     env.pre_step(actions)
+                
+                # # apply any dynamic objects (humans)
+                # past_locations = []
+                # obj.reset_wp([0,0,0,00,0,00,0])
+                # for obj in dynamic_obs:
+                #     obj.move()
+
+                # for i in range():
+                #     world.step(render=True)
+
+                # next_obs = []
+                # for env in envs:
+                #     _next_obs, _rewards, _terminated, _truncated, _infos = env.post_step()
+                #     next_obs.append(_next_obs)
                 # ==================== isaac sim stepping ====================
                 world.step(render=True) # execute one physics step and one rendering step
                 # envs.pretstep() # compoute observations
@@ -790,9 +890,10 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             # ==================== imagine ====================
             # Example Usage
             # check_iteration = 10000
+            # check_iteration = [1000, 5000, 10000]
             # imagination_horizon = 32
 
-            # if policy_step == check_iteration - imagination_horizon:
+            # if (policy_step + imagination_horizon) in check_iteration:
             #     print('Reach policy_step: ', policy_step)
             #     imagination_stochastic_state = player.stochastic_state.clone()
             #     imagination_recurrent_state = player.recurrent_state.clone()
@@ -818,8 +919,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             #     print('Saved as gif')
             #     output_path_imagined = "imagined_observations.gif"
             #     save_as_gif(imagined_observations, "rgb", output_path_imagined, duration=0.1)
+            #     log_imagination_as_gif(
+            #         reconstructed_obs_np=imagined_observations,
+            #         key="rgb",
+            #         cfg=cfg,
+            #         gif_name="Imagined Observation",
+            #         duration=0.1
+            #     )
 
-            # elif policy_step == check_iteration:
+            # elif policy_step in check_iteration:
             #     # Get the latest observations from the replay buffer using sample_latest_sequence
             #     latest_sequence = rb.sample_latest_sequence(imagination_horizon)
 
@@ -827,6 +935,14 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             #     latest_observations = {}
             #     for k in cfg.algo.cnn_keys.encoder:
             #         latest_observations[k] = latest_sequence[k]
+
+            #     log_true_observation_as_gif(
+            #         true_obs_np=latest_observations,
+            #         key="rgb",
+            #         cfg=cfg,
+            #         gif_name="True Observation",
+            #         duration=0.1,
+            #     )
 
             #     latest_observations['rgb'] = latest_observations['rgb'][0, :, 0, :, :, :]
             #     latest_observations['rgb'] = np.clip(latest_observations['rgb'], 0, 255).astype(np.uint8)
@@ -877,6 +993,60 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         )
                         cumulative_per_rank_gradient_steps += 1
                     train_step += world_size
+
+        # Log imagination gifs
+        if policy_step - last_log + cfg.algo.per_rank_sequence_length == cfg.metric.log_every:
+
+            # Latent states
+            imagination_stochastic_state = player.stochastic_state.clone()
+            imagination_recurrent_state = player.recurrent_state.clone()
+            imagined_latent_states = torch.cat((imagination_stochastic_state.detach(), imagination_recurrent_state.detach()), -1)
+
+            # Actions to take
+            actions_to_take = torch.cat(actor(imagined_latent_states.detach())[0], dim=-1) # can take any specific action
+
+            # Imagine
+            imagined_observations, imagined_actions = imagine(
+                fabric=fabric,
+                world_model=world_model,
+                actor=actor,
+                stochastic_state=imagination_stochastic_state,
+                recurrent_state=imagination_recurrent_state,
+                actions=actions_to_take,
+                horizon=cfg.algo.per_rank_sequence_length,
+                action_space=envs.single_action_space,
+                cfg=cfg,
+            )
+
+            # Log gif
+            for k in cfg.algo.cnn_keys.decoder:
+                log_imagination_as_gif(
+                reconstructed_obs_np=imagined_observations,
+                key=k,
+                cfg=cfg,
+                gif_name="Imagined Observation: " + k,
+                duration=0.1
+                )
+
+        # Log true observation gifs
+        if policy_step - last_log == cfg.metric.log_every:
+            # Get the latest observations from the replay buffer using sample_latest_sequence
+                latest_sequence = rb.sample_latest_sequence(cfg.algo.per_rank_sequence_length)
+
+                # Process latest observations
+                latest_observations = {}
+                for k in cfg.algo.cnn_keys.encoder:
+                    latest_observations[k] = latest_sequence[k]
+
+                # Log true observation gif
+                for k in cfg.algo.cnn_keys.decoder:
+                    log_true_observation_as_gif(
+                        true_obs_np=latest_observations,
+                        key=k,
+                        cfg=cfg,
+                        gif_name="True Observation: " + k,
+                        duration=0.1,
+                    )
 
         # Log metrics
         if cfg.metric.log_level > 0 and (policy_step - last_log >= cfg.metric.log_every or update == num_updates):
