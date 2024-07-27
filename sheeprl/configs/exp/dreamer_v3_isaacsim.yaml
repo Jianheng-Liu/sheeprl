@@ -16,7 +16,7 @@ env:
   max_episode_steps: -1
   wrapper:
     map_size: [128, 128]
-    rgb_size: [128, 128]
+    camera_rgb_size: [128, 128]
 
 # Checkpoint
 checkpoint:

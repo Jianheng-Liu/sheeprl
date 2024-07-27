@@ -44,7 +44,58 @@ from sheeprl.utils.utils import Ratio, save_configs
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
 
-# ==================== imagine ====================
+from map_utils import map_generation, find_empty_points, get_poi
+from a_star import a_star
+from SyntheticToolkit.core.dynamic_objects import DynamicObject
+
+# control_frequency = 10.0
+physics_dt = 0.1
+
+# Keywords to check for map generation
+map_keywords_to_check=[
+    'RackPile', 
+    'RackLong', 
+    'Forklift', 
+    'Table', 
+    'IndustrialSteelShelving', 
+    'WallA', 
+    'RackShelf', 
+    'RackFrame', 
+    'RackShield',
+    'PaletteA',
+    'EmergencyBoardFull',
+    'FuseBox',
+]
+map_size = (128, 128)
+map_resolution = 0.25
+map_offset = (26.5, 0.5, 0.0)
+occupancy_map = np.zeros(map_size)
+map_global = np.zeros(map_size)
+min_clear_radius = 4
+min_edge_distance = 10
+
+map_pixel_values = {
+    'Empty': int(0),
+    'Static Obstacle': int(1.0/8.0*255),
+    'Dynamic Obstacle': int(2.0/8.0*255),
+    'Dynamic Obstacle Trajectory': int(3.0/8.0*255),
+    'Position of Interest': int(4.0/8.0*255),
+    'Agent': int(5.0/8.0*255),
+    'Agent Trajectory': int(6.0/8.0*255),
+    'A* Path': int(7.0/8.0*255),
+    'Goal': int(255)
+}
+
+empty_points = [] 
+empty_positions = []
+
+poi_points = []
+poi_positions = []
+
+dynamic_obstacles_number = 8
+dynamic_obstacles_list = []
+
+# ==================== Imagine ====================
 import imageio
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
@@ -238,9 +289,9 @@ def log_true_observation_as_gif(
     writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
     writer.close()
     print(f"Logged gif to TensorBoard at {log_dir}")
-# ==================== imagine ====================
 
 
+# ==================== Imagine ====================
 def train(
     fabric: Fabric,
     world_model: WorldModel,
@@ -574,14 +625,57 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     fabric.print(f"Log dir: {log_dir}")
 
     # Environment setup
-    # ==================== isaac sim initializing ====================
+    # ==================== Isaac Sim Initializing ====================
     from omni.isaac.core import World
     from omni.isaac.core.utils.stage import open_stage
 
-    open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_02.usd')
+    open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_01.usd')
     world = World()
     world.reset()
-    # ==================== isaac sim initializing ====================
+
+    occupancy_map = map_generation(
+        world=world, 
+        map_size=map_size, 
+        resolution=map_resolution,
+        offset=map_offset, 
+        keywords_to_check=map_keywords_to_check, 
+    )
+
+    map_global = occupancy_map * map_pixel_values["Static Obstacle"]
+
+    # Fill the edges
+    for x in range(map_size[0]):
+        for y in range(map_size[1]):
+            if x < 2 or y < 3 or x > map_size[0] - 2 or y > map_size[1] - 5:
+                map_global[x][y] = map_pixel_values["Static Obstacle"]
+
+    poi_points, poi_positions = get_poi(
+        world=world,
+        resolution=map_resolution, 
+        offset=map_offset
+    )
+
+    for point in poi_points:
+        map_global[point[0]][point[1]] = map_pixel_values["Position of Interest"]
+
+    print('POIs: ', poi_positions)
+
+    empty_points, empty_positions = find_empty_points(
+        occupancy_map=map_global, 
+        resolution=map_resolution,
+        offset=map_offset,
+        min_clear_radius=min_clear_radius, 
+        min_edge_distance=min_edge_distance
+    )
+
+    import matplotlib.pyplot as plt
+    plt.imshow(map_global, cmap='gray', origin='lower')
+    plt.title("Occupancy Map")
+    plt.savefig("occupancy_map.png")
+
+    print('Empty Area: ', empty_points)
+    print('Empty positions: ', empty_positions)
+    # ==================== Isaac Sim Initializing ====================
 
     vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
     envs = vectorized_env(
@@ -737,9 +831,16 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         )
 
     # Get the first environment observation and start the optimization
+    for env_idx, env in enumerate(envs.envs):
+        env.get_global_map()
+
+
     step_data = {}
     obs = envs.reset(seed=cfg.seed)[0]
+    
     for k in obs_keys:
+        print('Key: ', k)
+        print('Envs reset observation shape: ', obs[k].shape)
         step_data[k] = obs[k][np.newaxis]
     step_data["rewards"] = np.zeros((1, cfg.env.num_envs, 1))
     step_data["truncated"] = np.zeros((1, cfg.env.num_envs, 1))
@@ -775,6 +876,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     mask = {k: v for k, v in torch_obs.items() if k.startswith("mask")}
                     if len(mask) == 0:
                         mask = None
+
                     real_actions = actions = player.get_actions(torch_obs, mask=mask)
                     actions = torch.cat(actions, -1).cpu().numpy()
                     if is_continuous:
@@ -790,7 +892,11 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 next_obs, rewards, terminated, truncated, infos = envs.step(
                     real_actions.reshape(envs.action_space.shape)
                 )
-                # === how we call isaac sim and integrate with dreamer
+
+                # ================= Interact with the Isaac Sim Environment =======================
+                for env_idx, env in enumerate(envs.envs):
+                    print('Env idx: ', env_idx)
+                    # env.test()
                 # here we need to manage the global map.
                 # base_global_map = None
                 # get the dynamic objexts positions and previous pos
@@ -819,7 +925,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 # ==================== isaac sim stepping ====================
                 world.step(render=True) # execute one physics step and one rendering step
                 # envs.pretstep() # compoute observations
-                # ==================== isaac sim stepping ====================
+                # ================= Interact with the Isaac Sim Environment =======================
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
 
             step_data["is_first"] = np.zeros_like(step_data["terminated"])

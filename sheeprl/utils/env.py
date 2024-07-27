@@ -70,6 +70,8 @@ def make_env(
         if "rank" in cfg.env.wrapper:
             instantiate_kwargs["rank"] = rank + vector_env_idx
         env = hydra.utils.instantiate(cfg.env.wrapper, **instantiate_kwargs, _convert_="all")
+        if cfg.env.id == "isaac_sim_environment":
+            env.set_camera_name(vector_env_idx)
 
         # action repeat
         if (
@@ -186,7 +188,7 @@ def make_env(
                 # back to 3D
                 if len(current_obs.shape) == 2:
                     current_obs = np.expand_dims(current_obs, axis=-1)
-                    if not cfg.env.grayscale:
+                    if not cfg.env.grayscale and k != 'local_map':
                         current_obs = np.repeat(current_obs, 3, axis=-1)
 
                 # channel first (PyTorch default)
@@ -196,9 +198,15 @@ def make_env(
 
         env = gym.wrappers.TransformObservation(env, transform_obs)
         for k in cnn_keys:
-            env.observation_space[k] = gym.spaces.Box(
-                0, 255, (1 if cfg.env.grayscale else 3, cfg.env.screen_size, cfg.env.screen_size), np.uint8
-            )
+            # Isaac Sim Map:
+            if k == 'local_map':
+                env.observation_space[k] = gym.spaces.Box(
+                    0, 255, (1, cfg.env.screen_size, cfg.env.screen_size), np.uint8
+                )
+            else:
+                env.observation_space[k] = gym.spaces.Box(
+                    0, 255, (1 if cfg.env.grayscale else 3, cfg.env.screen_size, cfg.env.screen_size), np.uint8
+                )
 
         if cnn_keys is not None and len(cnn_keys) > 0 and cfg.env.frame_stack > 1:
             if cfg.env.frame_stack_dilation <= 0:

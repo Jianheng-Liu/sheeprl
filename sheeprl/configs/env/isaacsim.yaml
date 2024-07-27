@@ -12,5 +12,10 @@ sync_env: True
 wrapper:
   _target_: sheeprl.envs.isaacsim.IsaacSimWrapper
   map_size: [128, 128]
-  rgb_size: [128, 128]
+  camera_rgb_size: [128, 128]
+  camera_height: 1.0
+  camera_linear_velocity: 0.5
+  camera_angular_velocity: 1.0
+  camera_parent: /World
+  camera_name: Camera_
   seed: null
