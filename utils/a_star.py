@@ -48,7 +48,34 @@ def _get_movements_8n():
             (1, -1, s2)]
 
 
-def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3):
+def find_nearest_traversable(start, gmap, movements):
+    """
+    Find the nearest traversable node from the given start node.
+    :param start: start node (x, y) in array indices
+    :param gmap: the grid map
+    :param movements: possible movements
+    :return: nearest traversable node
+    """
+    visited = set()
+    front = [(0, start)]
+    
+    while front:
+        cost, current = heappop(front)
+        
+        if gmap.is_inside_idx(current) and not gmap.is_occupied_idx(current):
+            return current
+        
+        visited.add(current)
+        
+        for dx, dy, _ in movements:
+            new_pos = (current[0] + dx, current[1] + dy)
+            if new_pos not in visited:
+                heappush(front, (cost + 1, new_pos))
+    
+    raise Exception('No traversable node found')
+
+
+def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3, min_distance_to_obstacle=2):
     """
     A* for 2D occupancy grid.
 
@@ -58,29 +85,26 @@ def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3):
     :param movement: select between 4-connectivity ('4N') and 8-connectivity ('8N', default)
     :param occupancy_cost_factor: a number the will be multiplied by the occupancy probability
         of a grid map cell to give the additional movement cost to this cell (default: 3).
+    :param min_distance_to_obstacle: minimum distance to obstacles for generated waypoints.
 
     :return: a tuple that contains: (the resulting path in meters, the resulting path in data array indices)
     """
 
+    def is_too_close_to_obstacle(pos):
+        """
+        Check if a position is too close to any obstacle
+        """
+        for dx in range(-min_distance_to_obstacle, min_distance_to_obstacle+1):
+            for dy in range(-min_distance_to_obstacle, min_distance_to_obstacle+1):
+                new_pos = (pos[0] + dx, pos[1] + dy)
+                if gmap.is_inside_idx(new_pos) and gmap.is_occupied_idx(new_pos):
+                    if dist2d(pos, new_pos) <= min_distance_to_obstacle:
+                        return True
+        return False
+
     # get array indices of start and goal
     start = gmap.get_index_from_coordinates(start_m[0], start_m[1])
     goal = gmap.get_index_from_coordinates(goal_m[0], goal_m[1])
-
-    # check if start and goal nodes correspond to free spaces
-    if gmap.is_occupied_idx(start):
-        raise Exception('Start node is not traversable')
-
-    if gmap.is_occupied_idx(goal):
-        raise Exception('Goal node is not traversable')
-
-    # add start node to front
-    # front is a list of (total estimated cost to goal, total cost from start to node, node, previous node)
-    start_node_cost = 0
-    start_node_estimated_cost_to_goal = dist2d(start, goal) + start_node_cost
-    front = [(start_node_estimated_cost_to_goal, start_node_cost, start, None)]
-
-    # use a dictionary to remember where we came from in order to reconstruct the path later on
-    came_from = {}
 
     # get possible movements
     if movement == '4N':
@@ -89,6 +113,21 @@ def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3):
         movements = _get_movements_8n()
     else:
         raise ValueError('Unknown movement')
+
+    # check if start node is traversable, if not find the nearest traversable node
+    if gmap.is_occupied_idx(start):
+        start = find_nearest_traversable(start, gmap, movements)
+
+    if gmap.is_occupied_idx(goal):
+        raise Exception('Goal node is not traversable')
+
+    # add start node to front
+    start_node_cost = 0
+    start_node_estimated_cost_to_goal = dist2d(start, goal) + start_node_cost
+    front = [(start_node_estimated_cost_to_goal, start_node_cost, start, None)]
+
+    # use a dictionary to remember where we came from in order to reconstruct the path later on
+    came_from = {}
 
     # while there are elements to investigate in our front.
     while front:
@@ -124,8 +163,12 @@ def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3):
 
             # add node to front if it was not visited before and is not an obstacle
             if (not gmap.is_visited_idx(new_pos)) and (not gmap.is_occupied_idx(new_pos)):
-                potential_function_cost = gmap.get_data_idx(new_pos)*occupancy_cost_factor
+                potential_function_cost = gmap.get_data_idx(new_pos) * occupancy_cost_factor
                 new_cost = cost + deltacost + potential_function_cost
+
+                if is_too_close_to_obstacle(new_pos):
+                    new_cost += occupancy_cost_factor * 8  # Increase cost if too close to obstacle
+
                 new_total_cost_to_goal = new_cost + dist2d(new_pos, goal) + potential_function_cost
 
                 heappush(front, (new_total_cost_to_goal, new_cost, new_pos, pos))
@@ -146,7 +189,6 @@ def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3):
         path_idx.reverse()
 
     return path, path_idx
-
 
 # ======================= Example Usage ==================================
 # from omni.isaac.kit import SimulationApp

@@ -44,11 +44,21 @@ from sheeprl.utils.utils import Ratio, save_configs
 # os.environ["PYOPENGL_PLATFORM"] = ""
 # os.environ["MUJOCO_GL"] = "osmesa"
 
-from map_utils import map_generation, find_empty_points, get_poi
-from a_star import a_star
-from SyntheticToolkit.core.dynamic_objects import DynamicObject
+from collections import OrderedDict
+import math
+import omni
+from omni.isaac.core import World
+from omni.isaac.core.utils.stage import open_stage
+from omni.physx import get_physx_simulation_interface
+from pxr import PhysicsSchemaTools, PhysxSchema, UsdPhysics, UsdGeom
 
-# control_frequency = 10.0
+from map_utils import map_generation, find_empty_points, get_poi
+from map_utils import position_meter_to_pixel, position_pixel_to_meter, waypoints_2d_to_3d
+from a_star import a_star
+from gridmap import OccupancyGridMap
+from SyntheticToolkit.core.dynamic_objects import DynamicObject
+from SyntheticToolkit.utils.omni_utils import euler_to_quaternion
+
 physics_dt = 0.1
 
 # Keywords to check for map generation
@@ -65,7 +75,10 @@ map_keywords_to_check=[
     'PaletteA',
     'EmergencyBoardFull',
     'FuseBox',
+    'FireExtinguisher'
 ]
+
+
 map_size = (128, 128)
 map_resolution = 0.25
 map_offset = (26.5, 0.5, 0.0)
@@ -73,6 +86,17 @@ occupancy_map = np.zeros(map_size)
 map_global = np.zeros(map_size)
 min_clear_radius = 4
 min_edge_distance = 10
+
+curriculum = 1
+max_curriculum = 5
+curriculum_threshold = 0.6
+worker_number_mapping = {
+    1: 2,
+    2: 3,
+    3: 4,
+    4: 5,
+    5: 6
+}
 
 map_pixel_values = {
     'Empty': int(0),
@@ -92,13 +116,189 @@ empty_positions = []
 poi_points = []
 poi_positions = []
 
-dynamic_obstacles_number = 8
-dynamic_obstacles_list = []
+worker_number = 8
+worker_list = []
+worker_min_distance = 0.5
+
+class Worker(DynamicObject):
+    def __init__(
+        self,
+        position,
+        orientation,
+        scale,
+        prim_name,
+        parent_path,
+        stage,
+        usd_path=None,
+        semantic_class="None",
+        instanceable=False,
+        visibility="inherited",
+        disable_gravity=True,
+        scale_delta=0,
+    ) -> None:
+        super().__init__(
+            position,
+            orientation,
+            scale,
+            prim_name,
+            parent_path,
+            stage,
+            usd_path,
+            semantic_class,
+            instanceable,
+            visibility,
+            disable_gravity,
+            scale_delta
+        )
+
+        self.position_origin = position
+        self.done = False
+        # self.stuck = False
+        self.offset = map_offset
+
+        self.trajectory = []
+        self.trajectory_length = 32
+
+        self.position_target = [0.0, 0.0]
+        self.worker_min_distance = worker_min_distance
+
+        self.prim_name = prim_name
+        self.collision = False
+        self.contact_report_sub = (
+            get_physx_simulation_interface().subscribe_contact_report_events(
+                self.on_contact_report_event
+            )
+        )
+
+        # Add collider
+        prim = stage.GetPrimAtPath(self._prim_path)
+        collisionAPI = UsdPhysics.CollisionAPI.Apply(prim)
+        cylinderGeom = UsdGeom.Cylinder.Define(stage, self._prim_path + "/Collider")
+        cylinderGeom.GetHeightAttr().Set(1.5)  # Set Height (m)
+        cylinderGeom.GetRadiusAttr().Set(0.25)  # Set Radius (m)
+        cylinderGeom.GetVisibilityAttr().Set(UsdGeom.Tokens.invisible)  # Invisible
+
+    def on_contact_report_event(self, contact_headers, contact_data):
+        
+        for contact_header in contact_headers:
+            act0_path = str(PhysicsSchemaTools.intToSdfPath(contact_header.actor0))
+            act1_path = str(PhysicsSchemaTools.intToSdfPath(contact_header.actor1))
+            # print(f"Collision detected between {act0_path} and {act1_path}")
+
+            # if (self.prim_name in act0_path or self.prim_name in act1_path) and "GroundPlane" not in act0_path and "GroundPlane" not in act1_path:
+            if self.prim_name in act0_path or self.prim_name in act1_path:
+                if "Camera" not in act0_path and "Camera" not in act1_path:
+                    if "RecRed" not in act0_path and "RecRed" not in act1_path:
+                        self.collision = True
+                        print(f"Collision detected between {act0_path} and {act1_path}")
+                        return
+            
+
+    def set_worker_waypoints(self, waypoints_a_star):
+        waypoints_worker = []
+        for waypoint in waypoints_a_star:
+            waypoints_worker.append([waypoint[0]-self.offset[0], waypoint[1]-self.offset[1], waypoint[2]-self.offset[2]])
+        # print('Worker waypoints: ', waypoints_worker)
+        self.position_target = [waypoints_worker[-1][0], waypoints_worker[-1][1]]
+        self.init_waypoints(waypoints_worker)
+        self.done = False
+        # self.stuck = False
+        self.collision = False
+
+    def update_trajectory(self):
+        position_current, _ = self.get_pos_rot()
+        position_meter = [position_current[0], position_current[1]]
+        position_pixel = position_meter_to_pixel(position_meter=position_meter, resolution=map_resolution, offset=map_offset)
+        if len(self.trajectory) < self.trajectory_length:
+            self.trajectory.append(position_pixel)
+        else:
+            self.trajectory.pop(0)
+            self.trajectory.append(position_pixel)
+    
+    def is_done(self):
+        translation = self.get_translate()
+        position_current = [translation[0], translation[1]]
+        distance = np.linalg.norm(np.array(self.position_target) - np.array(position_current))
+        if distance < self.worker_min_distance:
+            self.done = True
+        return self.done
+    
+    # def is_stuck(self):
+    #     self.stuck = False
+    #     if len(self.trajectory) == self.trajectory_length:
+    #         first_pos = self.trajectory[0]
+    #         for pos in self.trajectory:
+    #             if pos != first_pos:
+    #                 self.stuck = False
+    #                 return self.stuck
+    #     self.stuck = True
+    #     return self.stuck
+
+        # translation = self.get_translate()
+        # position_current = [translation[0], translation[1]]
+        # distance = np.linalg.norm(np.array(self.position_target) - np.array(position_current))
+        # if distance < self.worker_min_distance:
+        #     self.done = True
+        # return self.done
+    
 
 # ==================== Imagine ====================
 import imageio
 import numpy as np
 from torch.utils.tensorboard import SummaryWriter
+
+color_map = {
+    'Empty': (255, 255, 255),  # White
+    'Static Obstacle': (0, 0, 0),  # Black
+    'Dynamic Obstacle': (255, 0, 0),  # Red
+    'Dynamic Obstacle Trajectory': (255, 165, 0),  # Orange
+    'Position of Interest': (0, 255, 0),  # Green
+    'Agent': (0, 0, 255),  # Blue
+    'Agent Trajectory': (75, 0, 130),  # Indigo
+    'A* Path': (238, 130, 238),  # Violet
+    'Goal': (255, 255, 0)  # Yellow
+}
+
+def paint_neighbor(map, point, value):
+    neighbors = [
+        [point[0], point[1]],
+        [point[0]+1, point[1]],
+        [point[0]-1, point[1]],
+        [point[0], point[1]+1],
+        [point[0], point[1]-1],
+        [point[0]+1, point[1]+1],
+        [point[0]+1, point[1]-1],
+        [point[0]-1, point[1]+1],
+        [point[0]-1, point[1]-1],
+        [point[0]+2, point[1]],
+        [point[0]-2, point[1]],
+        [point[0], point[1]+2],
+        [point[0], point[1]-2]
+    ]
+    for neighbor in neighbors:
+        if 0 <= neighbor[0] < map_size[0] and 0 <= neighbor[1] < map_size[1]:
+            map[neighbor[0], neighbor[1]] = value
+
+def get_closest_category(pixel_value):
+    closest_category = 'Empty'
+    min_diff = float('inf')
+    for category, value in map_pixel_values.items():
+        diff = abs(pixel_value - value)
+        if diff < min_diff:
+            min_diff = diff
+            closest_category = category
+    return closest_category
+
+def convert_to_color_image(single_channel_obs):
+    height, width = single_channel_obs.shape
+    color_image = np.zeros((height, width, 3), dtype=np.uint8)
+
+    for i in range(height):
+        for j in range(width):
+            category = get_closest_category(single_channel_obs[i, j])
+            color_image[i, j] = color_map[category]
+
+    return color_image
 
 def imagine(
     fabric: Fabric,
@@ -218,23 +418,14 @@ def save_as_gif(
 
 
 def log_imagination_as_gif(
+    fabric,
     reconstructed_obs_np: Dict[str, np.ndarray],
     key: str,
     cfg: Dict[str, Any],
     gif_name: str,
     duration: float = 0.1,
 ):
-    """
-    Log the specified observation from reconstructed_obs_np as a GIF to TensorBoard.
-
-    Args:
-        reconstructed_obs_np (Dict[str, np.ndarray]): The reconstructed observations as a dictionary of numpy arrays.
-        key (str): The key for the observation to save as a gif.
-        cfg (DictConfig): the configs.
-        gif_name (str): Name for the GIF and the tag in TensorBoard.
-        duration (float): Duration of each frame in the GIF.
-    """
-    log_dir = cfg.metric.logger.root_dir + '/' + cfg.metric.logger.name
+    log_dir = get_log_dir(fabric, cfg.root_dir, cfg.run_name)
 
     if key not in reconstructed_obs_np:
         print(f"Key '{key}' not found in the reconstructed observations.")
@@ -242,36 +433,75 @@ def log_imagination_as_gif(
 
     observation = reconstructed_obs_np[key]
 
-    # Assuming observation shape is (horizon, channels, height, width)
+    if key == 'map':
+        # print('Map Shape: ', observation.shape)
+        for channel_idx in range(2):
+            single_channel_obs = observation[:, channel_idx, :, :]  # (horizon, height, width)
+            color_observation = np.stack([convert_to_color_image(frame) for frame in single_channel_obs])
+            for i, frame in enumerate(color_observation):
+                imageio.imwrite(f'./visualize/imagination/channel_{channel_idx}_frame_{i}.png', frame)
+            color_observation = np.clip(color_observation, 0, 255).astype(np.uint8)
+            # print('imagine map color observation shape: ', color_observation.shape)
+            # magine map color observation shape:  (64, 128, 128, 3)
+            # imagine map observation tensor shape:  torch.Size([1, 64, 3, 128, 128])
 
-    # Convert observation to tensor and add batch dimension
-    observation_tensor = torch.tensor(observation).unsqueeze(0)  # (1, horizon, height, width, channels)
+            # Save GIF locally
+            # print('color_observation dtype: ', color_observation.dtype)
+            # print(color_observation)
+            color_observation = np.array(color_observation)
 
-    # Log the video to TensorBoard
-    writer = SummaryWriter(log_dir=log_dir)
-    writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
-    writer.close()
+            # gif_path = os.path.join(f"{gif_name}_channel_{channel_idx}.gif")
+            # imageio.mimsave(gif_path, color_observation, duration=duration)
+            # print(f"Saved GIF to {gif_path}")
+
+            observation_tensor = torch.tensor(color_observation, dtype=torch.float32).permute(0, 3, 1, 2).unsqueeze(0)  # (1, horizon, 3, height, width)
+            # print('imagine map observation tensor shape: ', observation_tensor.shape)
+
+            # [0, 1]
+            observation_tensor /= 255.0
+
+            # print('imagine map tensor max value: ', torch.max(observation_tensor))
+            # print('imagine map tensor min value: ', torch.min(observation_tensor))
+
+            # print(f'Map Single Channel {channel_idx} Shape: ', observation_tensor.shape)
+            # print('Observation tensor dtype:', observation_tensor.dtype)
+
+            writer = SummaryWriter(log_dir=log_dir)
+            writer.add_video(f"{gif_name}_channel_{channel_idx}", observation_tensor, fps=int(1/duration))
+            writer.close()
+
+    # else:
+    #     # Save GIF locally
+    #     # gif_path = os.path.join(f"{gif_name}_rgb.gif")
+    #     # imageio.mimsave(gif_path, observation, duration=duration)
+    #     # print(f"Saved GIF to {gif_path}")
+    #     # # print('imagine observation shape: ', observation.shape)
+    #     # imagine observation shape:  (64, 3, 128, 128)
+    #     # imagine observation tensor shape:  torch.Size([1, 64, 3, 128, 128])
+        
+    #     observation_tensor = torch.tensor(observation, dtype=torch.float32).unsqueeze(0)  # (1, horizon, channels, height, width)
+    #     # print('imagine observation tensor shape: ', observation_tensor.shape)
+    #     observation_tensor /= 255.0
+
+    #     # print('imagine tensor max value: ', torch.max(observation_tensor))
+    #     # print('imagine tensor min value: ', torch.min(observation_tensor))
+
+    #     writer = SummaryWriter(log_dir=log_dir)
+    #     writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
+    #     writer.close()
+    
     print(f"Logged gif to TensorBoard at {log_dir}")
 
 
 def log_true_observation_as_gif(
+    fabric,
     true_obs_np: Dict[str, np.ndarray],
     key: str,
     cfg: Dict[str, Any],
     gif_name: str,
     duration: float = 0.1,
 ):
-    """
-    Log the specified observation from true_obs_np as a GIF to TensorBoard.
-
-    Args:
-        true_obs_np (Dict[str, np.ndarray]): The reconstructed observations as a dictionary of numpy arrays.
-        key (str): The key for the observation to save as a gif.
-        cfg (DictConfig): the configs.
-        gif_name (str): Name for the GIF and the tag in TensorBoard.
-        duration (float): Duration of each frame in the GIF.
-    """
-    log_dir = cfg.metric.logger.root_dir + '/' + cfg.metric.logger.name
+    log_dir = get_log_dir(fabric, cfg.root_dir, cfg.run_name)
 
     if key not in true_obs_np:
         print(f"Key '{key}' not found in the reconstructed observations.")
@@ -279,15 +509,51 @@ def log_true_observation_as_gif(
 
     observation = true_obs_np[key][0, :, 0, :, :, :]
 
-    # Assuming observation shape is (horizon, channels, height, width)
+    # print('True Observation Shape: ', observation.shape)
 
-    # Convert observation to tensor and add batch dimension
-    observation_tensor = torch.tensor(observation).unsqueeze(0)  # (1, horizon, height, width, channels)
+    if key == 'map':
+        for channel_idx in range(2): 
+            single_channel_obs = observation[:, channel_idx, :, :]  # (horizon, height, width)
+            color_observation = np.stack([convert_to_color_image(frame) for frame in single_channel_obs])
+            color_observation = np.clip(color_observation, 0, 255).astype(np.uint8)
 
-    # Log the video to TensorBoard
-    writer = SummaryWriter(log_dir=log_dir)
-    writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
-    writer.close()
+            for i, frame in enumerate(color_observation):
+                imageio.imwrite(f'./visualize/true/channel_{channel_idx}_frame_{i}.png', frame)
+
+            # Save GIF locally
+            # gif_path = os.path.join(f"{gif_name}_channel_{channel_idx}.gif")
+            # imageio.mimsave(gif_path, color_observation, duration=duration)
+            # print(f"Saved GIF to {gif_path}")
+            
+            observation_tensor = torch.tensor(color_observation, dtype=torch.float32).permute(0, 3, 1, 2).unsqueeze(0)  # (1, horizon, 3, height, width)
+
+            observation_tensor /= 255.0
+
+            # print('true map tensor max value: ', torch.max(observation_tensor))
+            # print('true map tensor min value: ', torch.min(observation_tensor))
+
+            # print(f'Map Single Channel {channel_idx} Shape: ', observation_tensor.shape)
+            # print('Observation tensor dtype:', observation_tensor.dtype)
+
+            writer = SummaryWriter(log_dir=log_dir)
+            writer.add_video(f"{gif_name}_channel_{channel_idx}", observation_tensor, fps=int(1/duration))
+            writer.close()
+    # else:
+    #     # Save GIF locally
+    #     # gif_path = os.path.join(f"{gif_name}_rgb.gif")
+    #     # imageio.mimsave(gif_path, color_observation, duration=duration)
+    #     # print(f"Saved GIF to {gif_path}")
+
+    #     observation_tensor = torch.tensor(observation, dtype=torch.float32).unsqueeze(0)  # (1, horizon, channels, height, width)
+    #     # print('observation tensor shape: ', observation_tensor.shape)
+    #     observation_tensor /= 255.0
+    #     # print('true tensor max value: ', torch.max(observation_tensor))
+    #     # print('true tensor min value: ', torch.min(observation_tensor))
+
+    #     writer = SummaryWriter(log_dir=log_dir)
+    #     writer.add_video(gif_name, observation_tensor, fps=int(1/duration))
+    #     writer.close()
+    
     print(f"Logged gif to TensorBoard at {log_dir}")
 
 
@@ -626,11 +892,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Environment setup
     # ==================== Isaac Sim Initializing ====================
-    from omni.isaac.core import World
-    from omni.isaac.core.utils.stage import open_stage
-
-    open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_01.usd')
-    world = World()
+    open_stage(usd_path='/home/jianheng/omniverse/assets/Warehouse_Collision_01.usd')
+    world = World(physics_dt=physics_dt, rendering_dt=physics_dt,stage_units_in_meters=1.0)
     world.reset()
 
     occupancy_map = map_generation(
@@ -641,13 +904,13 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         keywords_to_check=map_keywords_to_check, 
     )
 
-    map_global = occupancy_map * map_pixel_values["Static Obstacle"]
-
     # Fill the edges
     for x in range(map_size[0]):
         for y in range(map_size[1]):
             if x < 2 or y < 3 or x > map_size[0] - 2 or y > map_size[1] - 5:
-                map_global[x][y] = map_pixel_values["Static Obstacle"]
+                occupancy_map[x][y] = 1
+
+    map_global = np.array(occupancy_map.copy()) * map_pixel_values["Static Obstacle"]
 
     poi_points, poi_positions = get_poi(
         world=world,
@@ -656,7 +919,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     )
 
     for point in poi_points:
-        map_global[point[0]][point[1]] = map_pixel_values["Position of Interest"]
+        # map_global[point[0]][point[1]] = map_pixel_values["Position of Interest"]
+        paint_neighbor(map_global, point, map_pixel_values["Position of Interest"])
 
     print('POIs: ', poi_positions)
 
@@ -668,13 +932,255 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         min_edge_distance=min_edge_distance
     )
 
-    import matplotlib.pyplot as plt
-    plt.imshow(map_global, cmap='gray', origin='lower')
-    plt.title("Occupancy Map")
-    plt.savefig("occupancy_map.png")
+    stage = omni.usd.get_context().get_stage()
 
-    print('Empty Area: ', empty_points)
-    print('Empty positions: ', empty_positions)
+    map_global_with_worker = map_global.copy()
+
+    global curriculum
+    worker_number = worker_number_mapping[curriculum]
+
+    for i in range(worker_number):
+
+        name = "Worker_" + str(i+1)
+        random_position_index = np.random.randint(len(empty_positions))
+        position_xy = empty_positions[random_position_index]
+
+        # print('position_xy: ', position_xy)
+
+        worker_list.append(
+            Worker(
+                position=(position_xy[0], position_xy[1], 1.0),
+                orientation=euler_to_quaternion(0, 0, 0),
+                scale=(1.0, 1.0, 1.0),
+                prim_name=name,
+                parent_path="/World",
+                stage=stage,
+                usd_path='/home/jianheng/omniverse/assets/Cube.usd',
+                semantic_class="worker",
+                instanceable=False,
+                visibility="inherited",
+                disable_gravity=True,
+                scale_delta=0,
+            )
+        )
+        map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
+        target_poi_idx = np.random.randint(len(poi_points))
+        target_poi_point = poi_points[target_poi_idx]
+        position_start_meter = [position_xy[0], position_xy[1]]
+        position_start = position_meter_to_pixel(position_start_meter)
+        # map_global_with_worker[position_start[0]][position_start[1]] = map_pixel_values["Dynamic Obstacle"]
+        paint_neighbor(map_global_with_worker, position_start, map_pixel_values["Dynamic Obstacle"])
+        target_poi_waypoints, _ = a_star((position_start[0] * map_resolution, position_start[1] * map_resolution), (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), map_a_star)
+        worker_list[i].set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+
+    # Add collision API for every prim in stage
+    # for prim in stage.Traverse():
+    #     prim_path = prim.GetPath()
+
+    #     collider_api = UsdPhysics.CollisionAPI.Get(stage, prim_path)
+    #     if collider_api:
+    #         PhysxSchema.PhysxContactReportAPI.Apply(prim)
+            # collision_enabled_attr = collider_api.GetCollisionEnabledAttr()
+            # collision_enabled = collision_enabled_attr.Get() if collision_enabled_attr else False
+            
+            # collision_type = "Unknown"
+            # if collision_enabled:
+                # if UsdPhysics.MeshCollisionAPI.CanApply(prim):
+                #     collision_type = "Mesh"
+                # elif UsdPhysics.SphereCollisionAPI.CanApply(prim):
+                #     collision_type = "Sphere"
+                # elif UsdPhysics.BoxCollisionAPI.CanApply(prim):
+                #     collision_type = "Box"
+                # elif UsdPhysics.CapsuleCollisionAPI.CanApply(prim):
+                #     collision_type = "Capsule"
+                # elif UsdPhysics.PlaneCollisionAPI.CanApply(prim):
+                #     collision_type = "Plane"
+    # import matplotlib.pyplot as plt
+    # plt.imshow(map_global, cmap='gray', origin='lower')
+    # plt.title("Occupancy Map")
+    # plt.savefig("occupancy_map.png")
+
+    # print('Empty Area: ', empty_points)
+    # print('Empty positions: ', empty_positions)
+
+    # world.reset()
+
+    # Test workers and agents
+    # obs_keys = cfg.algo.cnn_keys.encoder + cfg.algo.mlp_keys.encoder
+    # vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
+    # envs = vectorized_env(
+    #     [
+    #         partial(
+    #             RestartOnException,
+    #             make_env(
+    #                 cfg,
+    #                 cfg.seed + rank * cfg.env.num_envs + i,
+    #                 rank * cfg.env.num_envs,
+    #                 log_dir if rank == 0 else None,
+    #                 "train",
+    #                 vector_env_idx=i,
+    #             ),
+    #         )
+    #         for i in range(cfg.env.num_envs)
+    #     ]
+    # )
+
+    # Get the first environment observation and start the optimization
+    # for env_idx, env in enumerate(envs.envs):
+    #     env.get_global_map(
+    #         map_global=occupancy_map.copy() * map_pixel_values["Static Obstacle"],
+    #         map_global_with_worker=map_global_with_worker.copy(),
+    #         resolution=map_resolution,
+    #         offset=map_offset
+    #     )
+    #     env.get_env_idx(idx=env_idx)
+    #     env.init_camera(seed=None)
+
+    # for prim in stage.Traverse():
+    #     prim_path = prim.GetPath()
+
+    #     collider_api = UsdPhysics.CollisionAPI.Get(stage, prim_path)
+    #     if collider_api:
+    #         PhysxSchema.PhysxContactReportAPI.Apply(prim)
+
+    # world.reset()
+
+    # # Wait for camera ready
+    # i = 0
+    # while i<=10:
+    #     world.step()
+    #     i+=1
+
+    # step_data = {}
+    # obs = envs.reset(seed=None)[0]
+
+
+    # obs_dict = {key: [] for key in obs_keys}
+
+    # for env in envs.envs:
+    #     _obs = env.compute_obs()
+    #     for key in obs_keys:
+    #         obs_dict[key].append(_obs[key])
+
+    # obs = OrderedDict()
+    # for key, obs_list in obs_dict.items():
+    #     obs[key] = np.stack(obs_list, axis=0)
+
+    # step = 0
+    # while True:
+        # step += 1
+        # print('step number: ', step)
+
+        # for worker in worker_list:
+        #     worker.move()
+
+        # for env_idx, env in enumerate(envs.envs):
+        #     action = [1, 0, 0, 0]
+        #     env.pre_step(action)
+
+        # world.step(render=True)
+
+        # map_global_with_worker = map_global.copy()
+
+        # for worker_idx, worker in enumerate(worker_list):
+        #     position_current, rotation_current = worker.get_pos_rot()
+        #     for point in worker.trajectory:
+        #         if 0 <= point[0] < map_size[0] and 0 <= point[1] < map_size[1]:
+        #             map_global_with_worker[point[0]][point[1]] = map_pixel_values["Dynamic Obstacle Trajectory"]
+        #     position_pixel = position_meter_to_pixel(
+        #         position_meter=position_current,
+        #         resolution=map_resolution, 
+        #         offset=map_offset
+        #         )
+        #     if 0 <= position_pixel[0] < map_size[0] and 0 <= position_pixel[1] < map_size[1]:
+        #         # map_global_with_worker[position_pixel[0]][position_pixel[1]] = map_pixel_values["Dynamic Obstacle"]
+        #         paint_neighbor(map_global_with_worker, position_pixel, map_pixel_values["Dynamic Obstacle"])
+        #     else:
+        #         print('Out of the world')
+
+        # for env_idx, env in enumerate(envs.envs):
+        #     env.get_global_map(
+        #         map_global=occupancy_map.copy() * map_pixel_values["Static Obstacle"],
+        #         map_global_with_worker=map_global_with_worker.copy(),
+        #         resolution=map_resolution,
+        #         offset=map_offset
+        #     )
+
+        # obs_dict = {key: [] for key in obs_keys}
+        # rewards = []
+        # terminated = []
+        # truncated = []
+        # infos = []
+
+
+        # for env in envs.envs:
+        #     _obs, _rewards, _terminated, _truncated, _infos = env.post_step()
+        #     for key in obs_keys:
+        #         obs_dict[key].append(_obs[key])
+        #     rewards.append(_rewards)
+        #     terminated.append(_terminated)
+        #     truncated.append(_truncated)
+        #     infos.append(_infos)
+
+        # next_obs = OrderedDict()
+        # for key, obs_list in obs_dict.items():
+        #     next_obs[key] = np.stack(obs_list, axis=0) 
+
+        # rewards = np.array(rewards)
+        # terminated = np.array(terminated)
+        # truncated = np.array(truncated)
+
+
+        # for worker in worker_list:
+        #     worker.update_trajectory()
+        #     # print('Trajectory:', worker.trajectory)
+        #     worker_done = worker.is_done()
+        #     # worker_stuck = worker.is_stuck()
+        #     if worker.collision:
+        #         # Respawn
+        #         # position_current = worker.get_translate()
+        #         # nearest_position = None
+        #         # nearest_distance = float('inf')
+        #         # for pos in empty_positions:
+        #         #     distance = math.sqrt((position_current[0] - pos[0])**2 + (position_current[1] - pos[1])**2)
+        #         #     if distance < nearest_distance:
+        #         #         nearest_distance = distance
+        #         #         nearest_position = pos
+        #         random_position_index = np.random.randint(len(empty_positions))
+        #         position_xy = empty_positions[random_position_index]          
+        #         worker.set_translate([position_xy[0], position_xy[1], 1])
+        #         worker.set_orient(euler_to_quaternion(0, 0, 0))
+
+        #         # world.step()
+
+        #         map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
+        #         target_position = worker.position_target
+        #         target_poi_point = position_meter_to_pixel(target_position)
+        #         position_current = worker.get_translate()
+        #         position_start_meter = [position_current[0], position_current[1]]
+        #         position_start = position_meter_to_pixel(position_start_meter)
+        #         target_poi_waypoints, _ = a_star(
+        #             (position_start[0] * map_resolution, position_start[1] * map_resolution), 
+        #             (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), 
+        #             map_a_star
+        #         )
+        #         worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+
+        #     if worker_done:
+        #         # Go to the next POI
+        #         map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
+        #         target_poi_idx = np.random.randint(len(poi_points))
+        #         target_poi_point = poi_points[target_poi_idx]
+        #         position_current = worker.get_translate()
+        #         position_start_meter = [position_current[0], position_current[1]]
+        #         position_start = position_meter_to_pixel(position_start_meter)
+        #         target_poi_waypoints, _ = a_star(
+        #             (position_start[0] * map_resolution, position_start[1] * map_resolution), 
+        #             (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), 
+        #             map_a_star
+        #         )
+        #         worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+
     # ==================== Isaac Sim Initializing ====================
 
     vectorized_env = gym.vector.SyncVectorEnv if cfg.env.sync_env else gym.vector.AsyncVectorEnv
@@ -832,15 +1338,57 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     # Get the first environment observation and start the optimization
     for env_idx, env in enumerate(envs.envs):
-        env.get_global_map()
+        env.get_global_map(
+            map_global=occupancy_map.copy() * map_pixel_values["Static Obstacle"],
+            map_global_with_worker=map_global_with_worker.copy(),
+            resolution=map_resolution,
+            offset=map_offset
+        )
+        env.get_env_idx(idx=env_idx)
+        env.init_camera(seed=None)
 
+    # Add collider api
+    for prim in stage.Traverse():
+        prim_path = prim.GetPath()
+
+        collider_api = UsdPhysics.CollisionAPI.Get(stage, prim_path)
+        if collider_api:
+            PhysxSchema.PhysxContactReportAPI.Apply(prim)
+
+    world.reset()
+
+    # Wait for camera ready
+    i = 0
+    while i<=60:
+        world.step()
+        i+=1
 
     step_data = {}
-    obs = envs.reset(seed=cfg.seed)[0]
+    obs = envs.reset(seed=None)[0]
+
+    world.step()
+
+    # print('Initialize map: ', obs['map'].shape)
+    # print('Initialize rgb: ', obs['rgb'].shape)
+    # print('Initialize goal: ', obs['goal'].shape)
+
+
+    obs_dict = {key: [] for key in obs_keys}
+
+    for env in envs.envs:
+        _obs = env.compute_obs()
+        for key in obs_keys:
+            obs_dict[key].append(_obs[key])
+
+    obs = OrderedDict()
+    for key, obs_list in obs_dict.items():
+        obs[key] = np.stack(obs_list, axis=0)
+    # print('My obs map: ', obs['map'].shape)
+    # print('My obs rgb: ', obs['rgb'].shape)
+    # print('My obs goal: ', obs['goal'].shape)
+
     
     for k in obs_keys:
-        print('Key: ', k)
-        print('Envs reset observation shape: ', obs[k].shape)
         step_data[k] = obs[k][np.newaxis]
     step_data["rewards"] = np.zeros((1, cfg.env.num_envs, 1))
     step_data["truncated"] = np.zeros((1, cfg.env.num_envs, 1))
@@ -848,6 +1396,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
     step_data["is_first"] = np.ones_like(step_data["terminated"])
     player.init_states()
 
+    
     cumulative_per_rank_gradient_steps = 0
     for update in range(start_step, num_updates + 1):
         policy_step += cfg.env.num_envs * world_size
@@ -889,42 +1438,167 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 step_data["actions"] = actions.reshape((1, cfg.env.num_envs, -1))
                 rb.add(step_data, validate_args=cfg.buffer.validate_args)
 
-                next_obs, rewards, terminated, truncated, infos = envs.step(
-                    real_actions.reshape(envs.action_space.shape)
-                )
 
                 # ================= Interact with the Isaac Sim Environment =======================
+                map_global_with_worker = map_global.copy()
+
+                work_list_length = len(worker_list)
+                if work_list_length < worker_number:
+                    print('Adding new workers')
+                    for i in range(worker_number - work_list_length):
+                        name = "Worker_" + str(work_list_length+i+1)
+                        random_position_index = np.random.randint(len(empty_positions))
+                        position_xy = empty_positions[random_position_index]
+                        worker_list.append(
+                            Worker(
+                                position=(position_xy[0], position_xy[1], 1.0),
+                                orientation=euler_to_quaternion(0, 0, 0),
+                                scale=(1.0, 1.0, 1.0),
+                                prim_name=name,
+                                parent_path="/World",
+                                stage=stage,
+                                usd_path='/home/jianheng/omniverse/assets/Cube.usd',
+                                semantic_class="worker",
+                                instanceable=False,
+                                visibility="inherited",
+                                disable_gravity=True,
+                                scale_delta=0,
+                            )
+                        )
+                        world.step()
+                        map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
+                        target_poi_idx = np.random.randint(len(poi_points))
+                        target_poi_point = poi_points[target_poi_idx]
+                        position_start_meter = [position_xy[0], position_xy[1]]
+                        position_start = position_meter_to_pixel(position_start_meter)
+                        # map_global_with_worker[position_start[0]][position_start[1]] = map_pixel_values["Dynamic Obstacle"]
+                        paint_neighbor(map_global_with_worker, position_start, map_pixel_values["Dynamic Obstacle"])
+                        target_poi_waypoints, _ = a_star((position_start[0] * map_resolution, position_start[1] * map_resolution), (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), map_a_star)
+                        worker_list[-1].set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+                        # Add collider api
+                        prim_path = worker_list[-1]._full_prim_path
+                        collider_api = UsdPhysics.CollisionAPI.Get(stage, prim_path)
+                        if collider_api:
+                            PhysxSchema.PhysxContactReportAPI.Apply(prim)
+
+                for worker in worker_list:
+                    worker.move()
+
+                # print('Original Actions: ', actions)
                 for env_idx, env in enumerate(envs.envs):
-                    print('Env idx: ', env_idx)
-                    # env.test()
-                # here we need to manage the global map.
-                # base_global_map = None
-                # get the dynamic objexts positions and previous pos
-                # MAKE SURE TO SAVE PREVIOUS N POS OF OBJ
+                    if len(actions.shape) == 2:
+                        # print('Action taken: ', actions[env_idx])
+                        env.pre_step(actions[env_idx])
+                    elif len(actions.shape) == 3:
+                        # print('Actions: ', actions[0][env_idx])
+                        env.pre_step(actions[0][env_idx])
 
-                #update the base_global map with the position of each obj
-                # and their previous n positions
-                # These will need to be differnt values
-
-                # for env in envs:
-                #     env.pre_step(actions)
-                
-                # # apply any dynamic objects (humans)
-                # past_locations = []
-                # obj.reset_wp([0,0,0,00,0,00,0])
-                # for obj in dynamic_obs:
-                #     obj.move()
-
-                # for i in range():
-                #     world.step(render=True)
-
-                # next_obs = []
-                # for env in envs:
-                #     _next_obs, _rewards, _terminated, _truncated, _infos = env.post_step()
-                #     next_obs.append(_next_obs)
-                # ==================== isaac sim stepping ====================
                 world.step(render=True) # execute one physics step and one rendering step
-                # envs.pretstep() # compoute observations
+
+                map_global_with_worker = map_global.copy()
+
+                for worker_idx, worker in enumerate(worker_list):
+                    position_current, rotation_current = worker.get_pos_rot()
+                    for point in worker.trajectory:
+                        if 0 <= point[0] < map_size[0] and 0 <= point[1] < map_size[1]:
+                            map_global_with_worker[point[0]][point[1]] = map_pixel_values["Dynamic Obstacle Trajectory"]
+                    position_pixel = position_meter_to_pixel(
+                        position_meter=position_current,
+                        resolution=map_resolution, 
+                        offset=map_offset
+                        )
+                    if 0 <= position_pixel[0] < map_size[0] and 0 <= position_pixel[1] < map_size[1]:
+                        # map_global_with_worker[position_pixel[0]][position_pixel[1]] = map_pixel_values["Dynamic Obstacle"]
+                        paint_neighbor(map_global_with_worker, position_pixel, map_pixel_values["Dynamic Obstacle"])
+                    else:
+                        print('Out of the world')
+
+                for env_idx, env in enumerate(envs.envs):
+                    env.get_global_map(
+                        map_global=occupancy_map.copy() * map_pixel_values["Static Obstacle"],
+                        map_global_with_worker=map_global_with_worker.copy(),
+                        resolution=map_resolution,
+                        offset=map_offset
+                    )
+
+                obs_dict = {key: [] for key in obs_keys}
+                rewards = []
+                terminated = []
+                truncated = []
+                infos = {
+                    "final_info": []
+                }
+                
+                for env in envs.envs:
+                    _obs, _rewards, _terminated, _truncated, _infos = env.post_step()
+                    for key in obs_keys:
+                        obs_dict[key].append(_obs[key])
+                    rewards.append(_rewards)
+                    terminated.append(_terminated)
+                    truncated.append(_truncated)
+                    if "episode" in _infos:
+                        infos["final_info"].append(_infos)
+
+                next_obs = OrderedDict()
+                for key, obs_list in obs_dict.items():
+                    next_obs[key] = np.stack(obs_list, axis=0) 
+
+                rewards = np.array(rewards)
+                terminated = np.array(terminated)
+                truncated = np.array(truncated)
+
+                for worker in worker_list:
+                    worker.update_trajectory()
+                    # print('Trajectory:', worker.trajectory)
+                    worker_done = worker.is_done()
+                    # worker_stuck = worker.is_stuck()
+                    if worker.collision:
+                        # Respawn
+                        # position_current = worker.get_translate()
+                        # nearest_position = None
+                        # nearest_distance = float('inf')
+                        # for pos in empty_positions:
+                        #     distance = math.sqrt((position_current[0] - pos[0])**2 + (position_current[1] - pos[1])**2)
+                        #     if distance < nearest_distance:
+                        #         nearest_distance = distance
+                        #         nearest_position = pos
+                        worker.trajectory = []
+                        random_position_index = np.random.randint(len(empty_positions))
+                        position_xy = empty_positions[random_position_index]          
+                        worker.set_translate([position_xy[0], position_xy[1], 1])
+                        worker.set_orient(euler_to_quaternion(0, 0, 0))
+
+                        world.step()
+
+                        map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
+                        target_position = worker.position_target
+                        target_poi_point = position_meter_to_pixel(target_position)
+                        position_current = worker.get_translate()
+                        position_start_meter = [position_current[0], position_current[1]]
+                        position_start = position_meter_to_pixel(position_start_meter)
+                        target_poi_waypoints, _ = a_star(
+                            (position_start[0] * map_resolution, position_start[1] * map_resolution), 
+                            (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), 
+                            map_a_star
+                        )
+                        worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+
+                    if worker_done:
+                        # Go to the next POI
+                        map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
+                        target_poi_idx = np.random.randint(len(poi_points))
+                        target_poi_point = poi_points[target_poi_idx]
+                        position_current = worker.get_translate()
+                        position_start_meter = [position_current[0], position_current[1]]
+                        position_start = position_meter_to_pixel(position_start_meter)
+                        target_poi_waypoints, _ = a_star(
+                            (position_start[0] * map_resolution, position_start[1] * map_resolution), 
+                            (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), 
+                            map_a_star
+                        )
+                        worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+                
+                    
                 # ================= Interact with the Isaac Sim Environment =======================
                 dones = np.logical_or(terminated, truncated).astype(np.uint8)
 
@@ -949,10 +1623,30 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     if agent_ep_info is not None:
                         ep_rew = agent_ep_info["episode"]["r"]
                         ep_len = agent_ep_info["episode"]["l"]
+                        ep_col = agent_ep_info["episode"]["c"]
+                        ep_goa = agent_ep_info["episode"]["g"]
                         if aggregator and not aggregator.disabled:
                             aggregator.update("Rewards/rew_avg", ep_rew)
+                            # print("log reward ave: ", ep_rew)
                             aggregator.update("Game/ep_len_avg", ep_len)
-                        fabric.print(f"Rank-0: policy_step={policy_step}, reward_env_{i}={ep_rew[-1]}")
+                            aggregator.update("Game/goal", ep_goa)
+                            aggregator.update("Game/collision", ep_col)
+                            # print("log len ave: ", ep_len)
+                            aggregator.update("Game/curriculum_level", curriculum)
+                        fabric.print(f"Rank-0: policy_step={policy_step}, average_reward_env_{i}={ep_rew}")
+                        if policy_step - last_log == cfg.metric.log_every:
+                            print("Judging Increasing")
+                            if ep_rew > curriculum_threshold and curriculum < max_curriculum:
+                                print(">>>>>>>>>>>>>>>Increasing Difficulty>>>>>>>>>>>>>>>>>>>")
+                                increase_difficulty = True
+                                worker_number = worker_number_mapping[curriculum]
+                                for env in envs.envs:
+                                    env.increase_difficulty(increase_difficulty)
+
+                        # Increasing the difficulty
+                        # if ep_cur > curriculum and curriculum < max_curriculum:
+                        #     curriculum += 1
+                        #     worker_number = worker_number_mapping[curriculum]
 
             # Save the real next observation
             real_next_obs = copy.deepcopy(next_obs)
@@ -1105,19 +1799,22 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
             # Latent states
             imagination_stochastic_state = player.stochastic_state.clone()
+            # print('imagined sto shape: ', imagination_stochastic_state.shape)
+            imagination_stochastic_state_single = imagination_stochastic_state[:, 0:1, :]
             imagination_recurrent_state = player.recurrent_state.clone()
-            imagined_latent_states = torch.cat((imagination_stochastic_state.detach(), imagination_recurrent_state.detach()), -1)
-
+            # print('imagined recu shape: ', imagination_recurrent_state.shape)
+            imagination_recurrent_state_sigle = imagination_recurrent_state[:, 0:1, :]
+            imagined_latent_states_single = torch.cat((imagination_stochastic_state_single.detach(), imagination_recurrent_state_sigle.detach()), -1)
             # Actions to take
-            actions_to_take = torch.cat(actor(imagined_latent_states.detach())[0], dim=-1) # can take any specific action
+            actions_to_take = torch.cat(actor(imagined_latent_states_single.detach())[0], dim=-1) # can take any specific action
 
             # Imagine
             imagined_observations, imagined_actions = imagine(
                 fabric=fabric,
                 world_model=world_model,
                 actor=actor,
-                stochastic_state=imagination_stochastic_state,
-                recurrent_state=imagination_recurrent_state,
+                stochastic_state=imagination_stochastic_state_single,
+                recurrent_state=imagination_recurrent_state_sigle,
                 actions=actions_to_take,
                 horizon=cfg.algo.per_rank_sequence_length,
                 action_space=envs.single_action_space,
@@ -1127,11 +1824,12 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             # Log gif
             for k in cfg.algo.cnn_keys.decoder:
                 log_imagination_as_gif(
-                reconstructed_obs_np=imagined_observations,
-                key=k,
-                cfg=cfg,
-                gif_name="Imagined Observation: " + k,
-                duration=0.1
+                    fabric=fabric,
+                    reconstructed_obs_np=imagined_observations,
+                    key=k,
+                    cfg=cfg,
+                    gif_name="Imagined Observation: " + k,
+                    duration=0.1,
                 )
 
         # Log true observation gifs
@@ -1147,6 +1845,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                 # Log true observation gif
                 for k in cfg.algo.cnn_keys.decoder:
                     log_true_observation_as_gif(
+                        fabric=fabric,
                         true_obs_np=latest_observations,
                         key=k,
                         cfg=cfg,

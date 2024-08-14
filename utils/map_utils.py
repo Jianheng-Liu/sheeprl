@@ -38,10 +38,10 @@ def map_generation(
     def update_occupancy_map(prim):
         bbox_min, bbox_max = get_bounding_box(prim)
 
-        x_min = int((bbox_min[0] + offset[0]) / resolution)
-        x_max = int((bbox_max[0] + offset[0]) / resolution)
-        y_min = int((bbox_min[1] + offset[1]) / resolution)
-        y_max = int((bbox_max[1] + offset[1]) / resolution)
+        x_min = int((bbox_min[0] + offset[0]) / resolution) - 1
+        x_max = int((bbox_max[0] + offset[0]) / resolution) + 1
+        y_min = int((bbox_min[1] + offset[1]) / resolution) - 1
+        y_max = int((bbox_max[1] + offset[1]) / resolution) + 1
         
         # Ensure the indices are within map boundaries
         x_min = max(0, min(map_size[0] - 1, x_min))
@@ -107,8 +107,8 @@ def find_empty_points(occupancy_map, resolution=0.25, offset=(26.5, 0.5, 0.0), m
                     if not clear:
                         break
                 if clear:
-                    valid_points.append((x, y))
-                    valid_positions.append((x * resolution + offset[0], y * resolution + offset[1]))
+                    valid_points.append((y, x))
+                    valid_positions.append((y * resolution - offset[0], x * resolution - offset[1]))
     
     return valid_points, valid_positions
 
@@ -161,7 +161,35 @@ def get_poi(
                 poi_points.append((int((translation[0]+offset[0])/resolution), int((translation[1]+offset[1])/resolution)))
                                       
     return poi_points, poi_positions
+
+
+def position_meter_to_pixel(
+    position_meter=[0, 0],
+    resolution=0.25, 
+    offset=(26.5, 0.5, 0.0)
+):
+    position_pixel = [0, 0]
+    position_pixel[0] = int((position_meter[0] + offset[0]) / resolution)
+    position_pixel[1] = int((position_meter[1] + offset[1]) / resolution)
+    return position_pixel
     
+
+def position_pixel_to_meter(
+    position_pixel=[0, 0],
+    resolution=0.25, 
+    offset=(26.5, 0.5, 0.0)
+):
+    position_meter = [0.0, 0.0]
+    position_meter[0] = resolution * position_pixel[0] - offset[0]
+    position_meter[1] = resolution * position_pixel[1] - offset[1]
+    return position_meter
+
+
+def waypoints_2d_to_3d(waypoints_2d, height):
+    waypoints_3d = []
+    for waypoint in waypoints_2d:
+        waypoints_3d.append([waypoint[0], waypoint[1], height])
+    return waypoints_3d
 
 # ======================= Example Usage ==================================
 # from omni.isaac.kit import SimulationApp
