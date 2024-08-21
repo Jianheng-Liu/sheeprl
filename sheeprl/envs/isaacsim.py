@@ -7,14 +7,16 @@ import omni
 from omni.physx import get_physx_simulation_interface
 from pxr import Gf, UsdGeom, UsdPhysics, PhysicsSchemaTools
 import math
+import cv2
 from PIL import Image, ImageDraw
 
-from map_utils import find_empty_points, position_meter_to_pixel
+from map_utils import find_empty_points, position_meter_to_pixel, find_nearby_empty_points_by_path
 from gridmap import OccupancyGridMap
 from a_star import a_star
 from SyntheticToolkit.Sensors.rig import Rig
 from SyntheticToolkit.utils.omni_utils import euler_to_quaternion, euler_from_quaternion
 
+# TODO: Remove Global Information; Do not Update A* Waypoints Every Step
 class IsaacSimWrapper(gym.Wrapper):
     def __init__(
         self, 
@@ -41,45 +43,54 @@ class IsaacSimWrapper(gym.Wrapper):
 
         # self.goal_distance = 1.0
         self.curriculum = 1
-        self.max_curriculum = 5
+        self.max_curriculum = 8
         # self.curriculum_threshold = 1.0
         self.env_idx = 0
         self.step_num = 0
         self.episode_reward = 0
+        self.achieve_goal = 0
+        self.return_goal = 0
+        self.return_collision = 0
+        self.step_num_log_min = 4
         # self.max_step_num = 512
-        self.log_episode_number = 10
+        self.log_episode_number = 25
         self.log_rew = []
         self.log_len = []
         self.log_goa = []
         self.log_col = []
+        self.log_suc = []
         
         self.map_pixel_values = {
             'Empty': int(0),
-            'Static Obstacle': int(1.0/8.0*255),
-            'Dynamic Obstacle': int(2.0/8.0*255),
-            'Dynamic Obstacle Trajectory': int(3.0/8.0*255),
-            'Position of Interest': int(4.0/8.0*255),
-            'Agent': int(5.0/8.0*255),
-            'Agent Trajectory': int(6.0/8.0*255),
-            'A* Path': int(7.0/8.0*255),
+            'Static Obstacle': int(1.0/9.0*255),
+            'Dynamic Obstacle': int(2.0/9.0*255),
+            'Dynamic Obstacle Trajectory': int(3.0/9.0*255),
+            'Position of Interest': int(4.0/9.0*255),
+            'Agent': int(5.0/9.0*255),
+            'Agent Trajectory': int(6.0/9.0*255),
+            'Agent Orientation': int(7.0/9.0*255),
+            'A* Path': int(8.0/9.0*255),
             'Goal': int(255)
         }
 
-        # 1-4
+        # 1-7
+        # 8
         self.curriculum_mapping = {
-            "heading": [np.pi/3, np.pi/2, 2*np.pi/3, np.pi, np.inf],
-            "distance": [[2.0, 5.0], [3.0, 8.0], [6.0, 15.0], [10.0, 32.0], [-np.inf, np.inf]],
-            "step_num": [200, 300, 400, 500, 600],
-            "goal_distance": [1.4, 1.3, 1.2, 1.1, 1.0]
+            "heading": [np.pi, np.pi,  np.pi, np.pi, np.pi, np.pi, np.pi, np.pi],
+            "distance": [[2.0, 5.0], [5.0, 8.0], [8.0, 12.0], [12.0, 16.0], [16.0, 20.0], [20.0, 24.0], [24.0, 28.0], [0.0, np.inf]],
+            "step_num": [200, 250, 300, 350, 400, 400, 400, 400],
+            "goal_distance": [1.4, 1.3, 1.2, 1.1, 1.0, 1.0, 1.0, 1.0]
         }
-        # 5: random
+        # "distance": [[2.0, 5.0], [3.0, 7.0], [4.0, 9.0], [5.0, 12.0], [6.0, 15.0], [7.0, 18.0], [8.0, 21.0], [0.0, np.inf]],
+        
 
         self.map_global = None
         self.map_global_with_worker = None
+        self.worker_list = []
         self.map_resolution = None
         self.map_offset = None
-        self.min_clear_radius = 4
-        self.min_edge_distance = 10
+        self.min_clear_radius = 2
+        self.min_edge_distance = 2
 
         self.collision = False
         self.collision_with_agent = False
@@ -88,15 +99,21 @@ class IsaacSimWrapper(gym.Wrapper):
         self.trajectory = []
         self.trajectory_length = 32
         self.subgoal_idx = 2
+        
+
+        self.min_depth_value = 0.5
 
         self._render_mode: str = "rgb_array"
             
         # Define observation and action spaces
         self._observation_space = spaces.Dict({
-            "goal": spaces.Box(low=-np.inf, high=np.inf, shape=(2,), dtype=np.float32),
-            "heading": spaces.Box(low=-np.inf, high=np.inf, shape=(1,), dtype=np.float32),
+            "goal": spaces.Box(low=-2, high=2, shape=(4,), dtype=np.float32),
+            "heading": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
+            "orientation": spaces.Box(low=-1, high=1, shape=(2,), dtype=np.float32),
+            "distance": spaces.Box(low=0, high=64, shape=(1,), dtype=np.float32),
+            "dynamic": spaces.Box(low=0, high=64, shape=(16,), dtype=np.float32),
             "map": spaces.Box(low=0, high=255, shape=(2, map_size[0], map_size[1]), dtype=np.uint8),
-            "segmentation": spaces.Box(low=0, high=255, shape=(1, camera_rgb_size[0], camera_rgb_size[1]), dtype=np.uint8)
+            "depth": spaces.Box(low=0.5, high=32.0, shape=(1, camera_rgb_size[0], camera_rgb_size[1]), dtype=np.float32)
         })
 
         self._action_space = spaces.Discrete(4)  # One-hot, 0: forward, 1: rotate left, 2: rotate right, 3: no movement
@@ -138,11 +155,18 @@ class IsaacSimWrapper(gym.Wrapper):
                 # print(f"Collision detected between {act0_path} and {act1_path}")
                 return
             
-    def get_global_map(self, map_global, map_global_with_worker, resolution, offset):
+    def get_global_map(self, map_global, map_global_with_worker, worker_list, resolution, offset):
         self.map_global = map_global.copy()
         self.map_global_with_worker = map_global_with_worker.copy()
+        self.worker_list = worker_list
         self.map_resolution = resolution
         self.map_offset = offset
+    # def get_global_map(self, map_global, map_global_with_worker, resolution, offset):
+    #     self.map_global = map_global.copy()
+    #     self.map_global_with_worker = map_global_with_worker.copy()
+    #     self.map_resolution = resolution
+    #     self.map_offset = offset
+
 
 
     def get_env_idx(self, idx):
@@ -157,6 +181,7 @@ class IsaacSimWrapper(gym.Wrapper):
             self.log_len = []
             self.log_goa = []
             self.log_col = []
+            self.log_suc = []
 
 
     def update_trajectory(self):
@@ -176,6 +201,9 @@ class IsaacSimWrapper(gym.Wrapper):
             angle += 2 * np.pi
 
         return angle
+    
+    def get_distance(self, pos_1, pos_2):
+        return math.sqrt((pos_1[0] - pos_2[0]) ** 2 + (pos_1[1] - pos_2[1]) ** 2)
     
     def paint_neighbor(self, map, point, value):
         neighbors = [
@@ -237,6 +265,7 @@ class IsaacSimWrapper(gym.Wrapper):
         done = False
         truncated = False
         goal = False
+        over_time = False
 
         info = {}
 
@@ -246,10 +275,48 @@ class IsaacSimWrapper(gym.Wrapper):
         # calculate rewards
         # reward_time = -1
 
-        # reward_heading = math.cos(obs["heading"]) * 5
+        reward_heading = math.cos(obs["heading"][0])
 
-        goal_distance = math.sqrt(obs['goal'][0] ** 2 + obs['goal'][1] ** 2)
+        reward_moving = 0
+
+        if len(self.trajectory) > 4:
+            travel_distance = 0
+            for i in range(4):
+                travel_distance += self.get_distance(self.trajectory[-(i+1)], self.trajectory[-(i+2)])
+            if travel_distance < self.map_resolution:
+                reward_moving = -1
+        goal_distance = math.sqrt((obs['goal'][0] * self.map_resolution * self.map_size[0] / 2) ** 2 + (obs['goal'][1] * self.map_resolution * self.map_size[1] / 2) ** 2)
         # reward_distance = - (goal_distance - 0.5) * 0.5
+        # print('obs post step: ', obs["goal"])
+
+        reward_overlay = 0
+
+        position_agent, _ = self.camera_rig.get_pos_rot()
+        position_agent_pixel = position_meter_to_pixel(
+            position_meter=position_agent,
+            resolution=self.map_resolution,
+            offset=self.map_offset
+        )
+        point = position_agent_pixel
+        neighbors = [
+            [point[0], point[1]],
+            [point[0]+1, point[1]],
+            [point[0]-1, point[1]],
+            [point[0], point[1]+1],
+            [point[0], point[1]-1],
+            [point[0]+1, point[1]+1],
+            [point[0]+1, point[1]-1],
+            [point[0]-1, point[1]+1],
+            [point[0]-1, point[1]-1],
+            [point[0]+2, point[1]],
+            [point[0]-2, point[1]],
+            [point[0], point[1]+2],
+            [point[0], point[1]-2]
+        ]
+        for neighbor in neighbors:
+            if 0 <= neighbor[0] < self.map_size[0] and 0 <= neighbor[1] < self.map_size[1]:
+                if self.map_global_with_worker[neighbor[0], neighbor[1]] == self.map_pixel_values['Dynamic Obstacle'] or self.map_global_with_worker[neighbor[0], neighbor[1]] == self.map_pixel_values['Static Obstacle']:
+                    reward_overlay -= 1.0
         
         self.step_num += 1
 
@@ -257,14 +324,17 @@ class IsaacSimWrapper(gym.Wrapper):
         if goal_distance < self.curriculum_mapping["goal_distance"][self.curriculum-1]:
             # Arrive at the goal
             print('Arrive at the goal! - agent: ', self.env_idx, ' - stage: ', self.curriculum)
-            reward_goal = 1
-            done = True
+            reward_goal = 100
+            self.achieve_goal = 1
+            self.return_goal += reward_goal
+            done = False
             goal = True
 
         reward_collision = 0
         if self.collision:
             print('Collide! - agent: ', self.env_idx, ' - stage: ', self.curriculum)
-            reward_collision = -1
+            reward_collision = -50
+            self.return_collision += reward_collision
             done = True
         if self.collision_with_agent:
             # print('Collide with agent - agent: ', self.env_idx, ' - stage: ', self.curriculum)
@@ -276,53 +346,104 @@ class IsaacSimWrapper(gym.Wrapper):
             print('Max step number - agent: ', self.env_idx)
             # truncated = True
             done = True
+            over_time = True
 
         # print('Reward heading: ', reward_heading)
         # print('Reward distance: ', reward_distance)
         # print('Reward goal: ', reward_goal)
         # print('Reward collision: ', reward_collision)
 
-        reward = reward_goal + reward_collision
+        reward = reward_goal + reward_collision + reward_heading + reward_moving + reward_overlay
         self.episode_reward += reward
 
-        if done or truncated:
-            if len(self.log_rew) < self.log_episode_number:
-                self.log_rew.append(self.episode_reward)
-                self.log_len.append(self.step_num)
-                self.log_goa.append(reward_goal)
-                self.log_col.append(reward_collision)
+        if done or truncated or goal:
+            if done and self.step_num >= self.step_num_log_min:
+                # log
+                if len(self.log_rew) < self.log_episode_number:
+                    self.log_rew.append(self.episode_reward)
+                    self.log_len.append(self.step_num)
+                    rew_avg = sum(self.log_rew) / len(self.log_rew)
+                    len_avg = sum(self.log_len) / len(self.log_len)
 
-            else:
-                self.log_rew.pop(0)
-                self.log_rew.append(self.episode_reward)
-                self.log_len.pop(0)
-                self.log_len.append(self.step_num)
-                rew_avg = sum(self.log_rew) / len(self.log_rew)
-                len_avg = sum(self.log_len) / len(self.log_len)
-                goa = sum(self.log_goa)
-                col = sum(self.log_col)
-                
-                # # Increasing the difficulty
-                # if rew_avg >= self.curriculum_threshold and self.curriculum < self.max_curriculum:
-                #     print('>>>>>>>>>>>>>>>>>Increasing Difficulty!>>>>>>>>>>>>')
-                #     self.curriculum += 1
-                #     self.log_rew = []
-                #     self.log_len = []
+                    self.log_goa.append(self.return_goal)
+                    self.log_col.append(self.return_collision)
+                    goa = sum(self.log_goa) / len(self.log_goa)
+                    col = sum(self.log_col) / len(self.log_col)
 
-                info["episode"] = {
-                    "r": rew_avg,
-                    "l": len_avg,
-                    "c": col,
-                    "g": goa
-                }
+                    self.log_suc.append(self.achieve_goal)
+                    suc = sum(self.log_suc) / len(self.log_suc)
 
-            self.reset(spawn=True)
+                    info["episode"] = {
+                        "r": rew_avg,
+                        "l": len_avg,
+                        "c": col,
+                        "g": goa,
+                        "s": suc,
+                        "ready": False
+                    }
+                    
+
+                else:
+                    self.log_rew.pop(0)
+                    self.log_rew.append(self.episode_reward)
+                    self.log_len.pop(0)
+                    self.log_len.append(self.step_num)
+                    rew_avg = sum(self.log_rew) / len(self.log_rew)
+                    len_avg = sum(self.log_len) / len(self.log_len)
+                    
+                    self.log_goa.pop(0)
+                    self.log_goa.append(self.return_goal)
+                    self.log_col.pop(0)
+                    self.log_col.append(self.return_collision)
+                    goa = sum(self.log_goa) / len(self.log_goa)
+                    col = sum(self.log_col) / len(self.log_col)
+
+                    self.log_suc.pop(0)
+                    self.log_suc.append(self.achieve_goal)
+                    suc = sum(self.log_suc) / len(self.log_suc)
+                    
+                    # # Increasing the difficulty
+                    # if rew_avg >= self.curriculum_threshold and self.curriculum < self.max_curriculum:
+                    #     print('>>>>>>>>>>>>>>>>>Increasing Difficulty!>>>>>>>>>>>>')
+                    #     self.curriculum += 1
+                    #     self.log_rew = []
+                    #     self.log_len = []
+
+                    info["episode"] = {
+                        "r": rew_avg,
+                        "l": len_avg,
+                        "c": col,
+                        "g": goa,
+                        "s": suc,
+                        "ready": True
+                    }
+
+            if goal and not done:
+                if len(self.log_rew) < self.log_episode_number:
+                    self.log_suc.append(self.achieve_goal)
+                    suc = sum(self.log_suc) / len(self.log_suc)
+
+                    info["episode"] = {
+                        "s": suc,
+                        "ready": False
+                    }
+                else:
+                    self.log_suc.pop(0)
+                    self.log_suc.append(self.achieve_goal)
+                    suc = sum(self.log_suc) / len(self.log_suc)
+
+                    info["episode"] = {
+                        "s": suc,
+                        "ready": True
+                    }
+                    
             
-            # if not goal:
-            #     self.reset(spawn=True)
+            if not goal:
+                self.reset(spawn=True)
 
-            # elif goal:
-            #     self.reset(spawn=False)
+            elif goal:
+                self.reset(spawn=False)
+
             
         #return 
         return obs, reward, done, truncated, info
@@ -363,11 +484,11 @@ class IsaacSimWrapper(gym.Wrapper):
 
         # Goal relative position to the agent
         relative_goal_position_raw = [self.goal_position[0] - position_agent[0], self.goal_position[1] - position_agent[1]]
-        relative_goal_position = np.array(relative_goal_position_raw)
+        relative_goal_position = [relative_goal_position_raw[0] / self.map_resolution / self.map_size[0] * 2, relative_goal_position_raw[1] / self.map_resolution / self.map_size[1] * 2]
 
         # Orientation
         orientation_agent = euler_from_quaternion(orient_quat[0], orient_quat[1], orient_quat[2], orient_quat[3])
-        orient = np.array(orientation_agent[2])
+        orient = self.standardize_angle(orientation_agent[2])
 
         map_global_gridmap = OccupancyGridMap(
             data_array=self.map_global.copy(),
@@ -387,19 +508,37 @@ class IsaacSimWrapper(gym.Wrapper):
 
 
         goal_angle = self.standardize_angle(math.atan2(subgoal_position[1] - position_agent[1], subgoal_position[0] - position_agent[0]))
-        heading = [self.standardize_angle(goal_angle - orient)]
-        heading = np.array(heading)
+        heading = self.standardize_angle(goal_angle - orient)
+        distance_obs = np.array([len(waypoints_meter) * self.map_resolution])
 
         # if self.step_num == 32:
         # print("Env Idx: ", self.env_idx)
         # print('Current Pos: ', position_agent_raw)
-        # print('GOal Pos: ', self.goal_position)
+        # print('Goal Pos: ', self.goal_position)
         # print('Current Orient: ', orient)
         # print("Goal Position Relative: ", relative_goal_position)
         # print("Subgoal Position: ", subgoal_position)
         # print("Heading: ", heading)
-        
+        orient_pixel = [0, 0]
+        if -np.pi/8 < orient <= np.pi/8:
+            orient_pixel = [2, 0]
+        elif np.pi/8 < orient <= 3*np.pi/8:
+            orient_pixel = [1, 1]
+        elif 3*np.pi/8 < orient <= 5*np.pi/8:
+            orient_pixel = [0, 2]
+        elif 5*np.pi/8 < orient <= 7*np.pi/8:
+            orient_pixel = [-1, 1]
+        elif -3*np.pi/8 < orient <= -np.pi/8:
+            orient_pixel = [1, -1]
+        elif -5*np.pi/8 < orient <= -3*np.pi/8:
+            orient_pixel = [0, -2]
+        elif -7*np.pi/8 < orient <= -5*np.pi/8:
+            orient_pixel = [-1, -1]
+        else:
+            orient_pixel = [-2, 0]
 
+        orient_map = [position_agent_pixel[0] + orient_pixel[0], position_agent_pixel[1] + orient_pixel[1]]
+        
         map_layer_1 = self.map_global_with_worker.copy()
         for point in self.trajectory:
             map_layer_1[point[0]][point[1]] = self.map_pixel_values["Agent Trajectory"]
@@ -407,7 +546,7 @@ class IsaacSimWrapper(gym.Wrapper):
         self.paint_neighbor(map_layer_1, position_goal_pixel, self.map_pixel_values["Goal"])
         # map_layer_1[position_agent_pixel[0]][position_agent_pixel[1]] = self.map_pixel_values["Agent"]
         self.paint_neighbor(map_layer_1, position_agent_pixel, self.map_pixel_values["Agent"])
-
+        
         map_layer_2 = self.map_global.copy()
         for point in self.trajectory:
             map_layer_2[point[0]][point[1]] = self.map_pixel_values["Agent Trajectory"]
@@ -418,6 +557,9 @@ class IsaacSimWrapper(gym.Wrapper):
         # map_layer_2[position_agent_pixel[0]][position_agent_pixel[1]] = self.map_pixel_values["Agent"]
         self.paint_neighbor(map_layer_2, position_agent_pixel, self.map_pixel_values["Agent"])
 
+        if 0 <= orient_map[0] < self.map_size[0] and 0 <= orient_map[1] < self.map_size[1]:
+            map_layer_1[orient_map[0]][orient_map[1]] = self.map_pixel_values["Agent Orientation"]
+            map_layer_2[orient_map[0]][orient_map[1]] = self.map_pixel_values["Agent Orientation"]
         # import matplotlib.pyplot as plt
         # # # # if self.step_num == 32:
         # plt.imshow(map_layer_1, cmap='gray')
@@ -432,18 +574,23 @@ class IsaacSimWrapper(gym.Wrapper):
 
         camera_output = self.camera_rig.compute_observations()[0]
 
-        rgb_image_raw = camera_output['rgb'][:, :, :3]
-
-        worker_bboxes = []
-        bounding_boxes = camera_output["bounding_boxes"]['data']
-        labels = camera_output["bounding_boxes"]['info']['idToLabels']
+        # rgb_image_raw = camera_output['rgb'][:, :, :3]
+        depth_image_raw = camera_output['depth']
+        depth_image_resized = cv2.resize(depth_image_raw, self.camera_rgb_size, interpolation=cv2.INTER_LINEAR)
+        depth_image_resized = np.nan_to_num(depth_image_resized, nan=self.min_depth_value)
+        depth_image_obs = np.expand_dims(depth_image_resized, axis=0)
         
-        for bbox in bounding_boxes:
-            label = labels[str(bbox['semanticId'])]['class']
-            # print(label)
-            if label == "worker":
-                # print('Worker insight')
-                worker_bboxes.append(bbox)
+
+        # worker_bboxes = []
+        # bounding_boxes = camera_output["bounding_boxes"]['data']
+        # labels = camera_output["bounding_boxes"]['info']['idToLabels']
+        
+        # for bbox in bounding_boxes:
+        #     label = labels[str(bbox['semanticId'])]['class']
+        #     # print(label)
+        #     if label == "worker":
+        #         # print('Worker insight')
+        #         worker_bboxes.append(bbox)
 
         # Convert the image from NumPy array to PIL Image
         # pil_image = Image.fromarray(rgb_image_raw)
@@ -473,17 +620,17 @@ class IsaacSimWrapper(gym.Wrapper):
         # plt.title("rgb_image")
         # plt.savefig("rgb_image_" + str(self.env_idx) + ".png")
 
-        segmentation_image = np.zeros((rgb_image_raw.shape[0], rgb_image_raw.shape[1]), dtype=np.uint8)
-        for bbox in worker_bboxes:
-            segmentation_image[bbox['y_min']:bbox['y_max'], bbox['x_min']:bbox['x_max']] = 255
-        # add noise
-        noise = np.random.normal(0, 20, segmentation_image.shape)
-        segmentation_image_noisy = segmentation_image + noise
-        segmentation_image_noisy_clipped = np.clip(segmentation_image_noisy, 0, 255).astype(np.uint8)
-        segmentation_image_resized_img = Image.fromarray(segmentation_image_noisy_clipped).resize((128, 128), Image.Resampling.LANCZOS)
+        # segmentation_image = np.zeros((rgb_image_raw.shape[0], rgb_image_raw.shape[1]), dtype=np.uint8)
+        # for bbox in worker_bboxes:
+        #     segmentation_image[bbox['y_min']:bbox['y_max'], bbox['x_min']:bbox['x_max']] = 255
+        # # add noise
+        # noise = np.random.normal(0, 20, segmentation_image.shape)
+        # segmentation_image_noisy = segmentation_image + noise
+        # segmentation_image_noisy_clipped = np.clip(segmentation_image_noisy, 0, 255).astype(np.uint8)
+        # segmentation_image_resized_img = Image.fromarray(segmentation_image_noisy_clipped).resize((128, 128), Image.Resampling.LANCZOS)
 
-        segmentation_image_resized = np.array(segmentation_image_resized_img)
-        segmentation_image_resized = np.expand_dims(segmentation_image_resized, axis=0) # 1， 128， 128
+        # segmentation_image_resized = np.array(segmentation_image_resized_img)
+        # segmentation_image_resized = np.expand_dims(segmentation_image_resized, axis=0) # 1， 128， 128
 
         # segmentation_pil_image_resized = Image.fromarray(segmentation_image_resized)
         # segmentation_pil_image_resized.save("segmentation_output_" + str(self.env_idx) + ".png")
@@ -499,13 +646,32 @@ class IsaacSimWrapper(gym.Wrapper):
         # Combine the observations into a dictionary
         map_observation = map_observation.astype(np.uint8)
         # rgb_image = rgb_image.astype(np.uint8)
-        segmentation_image_resized.astype(np.uint8)
-        
+        # segmentation_image_resized.astype(np.uint8)
+
+        orient_obs = np.array([np.cos(orient), np.sin(orient)])
+        heading_obs = np.array([np.cos(heading), np.sin(heading)])
+
+        worker_positions = []
+        for worker in self.worker_list:
+            worker_position_current, _ = worker.get_pos_rot()
+            worker_position = [(worker_position_current[0]-position_agent[0]) / self.map_resolution / self.map_size[0] * 2, (worker_position_current[1]-position_agent[1]) / self.map_resolution / self.map_size[0] * 2]
+            worker_angle = self.standardize_angle(math.atan2(worker_position[1], worker_position[0]))
+            worker_positions.append(worker_position[0])
+            worker_positions.append(worker_position[1])
+            worker_positions.append(np.cos(worker_angle))
+            worker_positions.append(np.sin(worker_angle))
+        worker_positions_obs = np.array(worker_positions)
+
+        global_goal_angle = self.standardize_angle(math.atan2(relative_goal_position[1], relative_goal_position[0]))
+        goal_obs = np.array([relative_goal_position[0], relative_goal_position[1], np.cos(global_goal_angle), np.sin(global_goal_angle)])
         obs = {
-            "goal": relative_goal_position,
-            "heading": heading,
+            "goal": goal_obs,
+            "heading": heading_obs,
+            "orientation": orient_obs,
+            "distance": distance_obs,
+            "dynamic": worker_positions_obs,
             "map": map_observation,
-            "segmentation": segmentation_image_resized
+            "depth": depth_image_obs
         }
         return obs
 
@@ -535,7 +701,7 @@ class IsaacSimWrapper(gym.Wrapper):
         UsdPhysics.CollisionAPI.Apply(prim)
         cylinderGeom = UsdGeom.Cylinder.Define(stage, prim_path + "/Collider")
         cylinderGeom.GetHeightAttr().Set(1)  # Set Height (cm)
-        cylinderGeom.GetRadiusAttr().Set(40)  # Set Radius (cm)
+        cylinderGeom.GetRadiusAttr().Set(25)  # Set Radius (cm)
         xform = UsdGeom.XformCommonAPI(cylinderGeom)
         offset = Gf.Vec3d(0.0, 0.0, (self.env_idx-4) * 2.5)  # Offset
         xform.SetTranslate(offset)
@@ -559,6 +725,9 @@ class IsaacSimWrapper(gym.Wrapper):
         if spawn:
             self.step_num = 0
             self.episode_reward = 0
+            self.achieve_goal = 0
+            self.return_goal = 0
+            self.return_collision = 0
             self.trajectory = []
 
             random_position_index = np.random.randint(len(empty_positions))
@@ -577,14 +746,23 @@ class IsaacSimWrapper(gym.Wrapper):
             orient_reset = np.array(orientation_eular[2])
 
         # Spawn the goal
-        if self.curriculum < 5:
+        if self.curriculum < self.max_curriculum:
             curriculum_empty_positions = []
             curriculum_empty_positions_backup = []
-            for empty_position in empty_positions:
+            _, empty_positions_by_path = find_nearby_empty_points_by_path(
+                occupancy_map=self.map_global.copy(), 
+                point = position_meter_to_pixel(position_reset),
+                min_distance = self.curriculum_mapping["distance"][self.curriculum-1][0],
+                max_distance = self.curriculum_mapping["distance"][self.curriculum-1][1],
+                resolution=self.map_resolution,
+                offset=self.map_offset,
+                min_clear_radius=self.min_clear_radius
+            )
+            # print(empty_positions_by_path)
+            for empty_position in empty_positions_by_path:
                 # print('empty position: ', empty_position)
-                relative_goal_position_raw = [empty_position[0] - position_reset[0], empty_position[1] - position_reset[1]]
+                relative_goal_position_raw = [empty_position[0]-position_reset[0], empty_position[1]-position_reset[1]]
                 distance = math.sqrt(relative_goal_position_raw[0] ** 2 + relative_goal_position_raw[1] **2)
-                # print('Distance: ', distance)
                 goal_angle = self.standardize_angle(math.atan2(relative_goal_position_raw[1], relative_goal_position_raw[0]))
                 heading = self.standardize_angle(goal_angle - orient_reset)
                 # print('Heading: ', heading)
@@ -593,7 +771,7 @@ class IsaacSimWrapper(gym.Wrapper):
                 if abs(heading) <= self.curriculum_mapping["heading"][self.curriculum-1] and self.curriculum_mapping["distance"][self.curriculum-1][0] < distance < self.curriculum_mapping["distance"][self.curriculum-1][1]:
                     curriculum_empty_positions.append(empty_position)
 
-                if self.curriculum_mapping["distance"][self.curriculum-1][0] < distance < self.curriculum_mapping["distance"][self.curriculum-1][1]:
+                else:
                     curriculum_empty_positions_backup.append(empty_position)
 
             if len(curriculum_empty_positions) > 0:
@@ -603,7 +781,7 @@ class IsaacSimWrapper(gym.Wrapper):
                 self.goal_position = curriculum_empty_positions[goal_random_position_index]
 
             elif len(curriculum_empty_positions_backup) > 0:
-                print('Resetting Agent: ', self.env_idx, ' Backup')
+                print('Resetting Agent: ', self.env_idx, ' Other Direction')
                 # print('Empty goal positions: ', curriculum_empty_positions)
                 goal_random_position_index = np.random.randint(len(curriculum_empty_positions_backup))
                 self.goal_position = curriculum_empty_positions_backup[goal_random_position_index]
@@ -613,7 +791,7 @@ class IsaacSimWrapper(gym.Wrapper):
                 goal_random_position_index = np.random.randint(len(empty_positions))
                 self.goal_position = empty_positions[goal_random_position_index]
 
-        elif self.curriculum == 5:
+        elif self.curriculum == self.max_curriculum:
             goal_random_position_index = np.random.randint(len(empty_positions))
             self.goal_position = empty_positions[goal_random_position_index]
 
