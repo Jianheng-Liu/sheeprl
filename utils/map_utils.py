@@ -1,4 +1,6 @@
 import numpy as np
+from queue import Queue
+import math
 from pxr import Usd, UsdGeom, Gf
 
 def map_generation(
@@ -70,6 +72,79 @@ def map_generation(
 
     return occupancy_map
 
+def find_nearby_empty_points_by_path(occupancy_map, point, min_distance, max_distance, resolution, offset=(26.5, 0.5, 0.0), obstacle_threshold=0.8, min_clear_radius=4):
+    """
+    Find empty points in the occupancy map within a given path distance range from a specified point.
+    
+    Args:
+        occupancy_map (np.ndarray): The occupancy map.
+        point (tuple): The point (x, y) in the map from which the search begins.
+        min_distance (float): The minimum distance within which points are not considered.
+        max_distance (float): The maximum distance up to which points are considered.
+        resolution (float): The resolution of the map in meters per pixel.
+        obstacle_threshold (int): The pixel value threshold above which the pixel is considered an obstacle.
+        min_clear_radius (int): The minimum Euclidean distance radius around the point that must be clear.
+
+    Returns:
+        valid_points (list): A list of points in the map that are clear and within the path distance range.
+        valid_positions (list): A list of points in the world that are clear and within the path distance range.
+    """
+    map_height, map_width = occupancy_map.shape
+    valid_points = []
+    valid_positions = []
+    
+    point_y, point_x = point
+    
+    # Convert distances from meters to pixels
+    min_distance_px = min_distance / resolution
+    max_distance_px = max_distance / resolution
+    
+    # Direction vectors for 8-connected grid (including diagonal moves)
+    directions = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+    
+    # Queue for BFS with starting point and initial distance (in pixels)
+    queue = Queue()
+    queue.put((point_x, point_y, 0))
+    
+    visited = np.zeros_like(occupancy_map, dtype=bool)
+    visited[point_y, point_x] = True
+    
+    while not queue.empty():
+        x, y, dist = queue.get()
+        
+        # If the distance exceeds max_distance, stop further processing
+        if dist > max_distance_px:
+            continue
+        
+        # If the point is within the valid distance range
+        if min_distance_px <= dist <= max_distance_px:
+            clear = True
+            # Check if the surrounding area is clear within the specified radius
+            for dx in range(-min_clear_radius, min_clear_radius + 1):
+                for dy in range(-min_clear_radius, min_clear_radius + 1):
+                    if dx ** 2 + dy ** 2 <= min_clear_radius ** 2:
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < map_width and 0 <= ny < map_height:
+                            if occupancy_map[ny, nx] > obstacle_threshold:
+                                clear = False
+                                break
+                if not clear:
+                    break
+            if clear:
+                valid_points.append((y, x))
+                valid_positions.append((y * resolution - offset[0], x * resolution - offset[1]))
+        
+        # Explore the neighbors
+        for dx, dy in directions:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < map_width and 0 <= ny < map_height and not visited[ny, nx]:
+                if occupancy_map[ny, nx] <= obstacle_threshold:
+                    visited[ny, nx] = True
+                    # Calculate the new distance: sqrt(2) for diagonal moves, 1 for straight moves
+                    new_dist = dist + (math.sqrt(2) if dx != 0 and dy != 0 else 1)
+                    queue.put((nx, ny, new_dist))
+    
+    return valid_points, valid_positions
 
 def find_empty_points(occupancy_map, resolution=0.25, offset=(26.5, 0.5, 0.0), min_clear_radius=4, min_edge_distance=10):
     """

@@ -201,7 +201,7 @@ def make_env(
                 env.observation_space[k] = gym.spaces.Box(
                     0, 255, (2, cfg.env.screen_size, cfg.env.screen_size), np.uint8
                 )
-            elif k == 'segmentation':
+            elif k == 'depth':
                 env.observation_space[k] = gym.spaces.Box(
                     0, 255, (1, cfg.env.screen_size, cfg.env.screen_size), np.uint8
                 )

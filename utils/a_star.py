@@ -75,7 +75,7 @@ def find_nearest_traversable(start, gmap, movements):
     raise Exception('No traversable node found')
 
 
-def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3, min_distance_to_obstacle=2):
+def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3, min_distance_to_obstacle=3):
     """
     A* for 2D occupancy grid.
 
@@ -189,6 +189,18 @@ def a_star(start_m, goal_m, gmap, movement='8N', occupancy_cost_factor=3, min_di
         path_idx.reverse()
 
     return path, path_idx
+
+# ======================= Example Usage ==================================
+# from omni.isaac.kit import SimulationApp
+# simulation_app = SimulationApp({"headless": False})
+
+# from map_generation import map_generation
+# import matplotlib.pyplot as plt
+
+# from omni.isaac.core import World
+# from omni.isaac.core.utils.stage import open_stage
+
+
 
 # ======================= Example Usage ==================================
 # from omni.isaac.kit import SimulationApp

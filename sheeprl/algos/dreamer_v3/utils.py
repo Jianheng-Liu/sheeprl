@@ -33,6 +33,12 @@ AGGREGATOR_KEYS = {
     "Grads/world_model",
     "Grads/actor",
     "Grads/critic",
+    "Game/curriculum_level",
+    "Game/goal",
+    "Game/collision",
+    "Game/success_rate",
+    "Game/collision_dynamic",
+    "Game/collision_static"
 }
 MODELS_TO_REGISTER = {"world_model", "actor", "critic", "target_critic", "moments"}
 

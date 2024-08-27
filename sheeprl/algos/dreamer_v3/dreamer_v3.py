@@ -84,29 +84,34 @@ map_resolution = 0.25
 map_offset = (26.5, 0.5, 0.0)
 occupancy_map = np.zeros(map_size)
 map_global = np.zeros(map_size)
-min_clear_radius = 4
-min_edge_distance = 10
+min_clear_radius = 2
+min_edge_distance = 2
+
+success_rate = 0.0
+ready_to_upgrade = False
 
 curriculum = 1
-max_curriculum = 5
-curriculum_threshold = 0.6
+max_curriculum = 6
+curriculum_threshold = 0.75
 worker_number_mapping = {
-    1: 2,
-    2: 3,
+    1: 4,
+    2: 4,
     3: 4,
-    4: 5,
-    5: 6
+    4: 4,
+    5: 4,
+    6: 4,
 }
 
 map_pixel_values = {
     'Empty': int(0),
-    'Static Obstacle': int(1.0/8.0*255),
-    'Dynamic Obstacle': int(2.0/8.0*255),
-    'Dynamic Obstacle Trajectory': int(3.0/8.0*255),
-    'Position of Interest': int(4.0/8.0*255),
-    'Agent': int(5.0/8.0*255),
-    'Agent Trajectory': int(6.0/8.0*255),
-    'A* Path': int(7.0/8.0*255),
+    'Static Obstacle': int(1.0/9.0*255),
+    'Dynamic Obstacle': int(2.0/9.0*255),
+    'Dynamic Obstacle Trajectory': int(3.0/9.0*255),
+    'Position of Interest': int(4.0/9.0*255),
+    'Agent': int(5.0/9.0*255),
+    'Agent Trajectory': int(6.0/9.0*255),
+    'Agent Orientation': int(7.0/9.0*255),
+    'A* Path': int(8.0/9.0*255),
     'Goal': int(255)
 }
 
@@ -115,6 +120,7 @@ empty_positions = []
 
 poi_points = []
 poi_positions = []
+poi_available_idxs = []
 
 worker_number = 8
 worker_list = []
@@ -160,6 +166,7 @@ class Worker(DynamicObject):
         self.trajectory_length = 32
 
         self.position_target = [0.0, 0.0]
+        self.position_target_idx = None
         self.worker_min_distance = worker_min_distance
 
         self.prim_name = prim_name
@@ -194,12 +201,13 @@ class Worker(DynamicObject):
                         return
             
 
-    def set_worker_waypoints(self, waypoints_a_star):
+    def set_worker_waypoints(self, waypoints_a_star, poi_idx):
         waypoints_worker = []
         for waypoint in waypoints_a_star:
             waypoints_worker.append([waypoint[0]-self.offset[0], waypoint[1]-self.offset[1], waypoint[2]-self.offset[2]])
         # print('Worker waypoints: ', waypoints_worker)
         self.position_target = [waypoints_worker[-1][0], waypoints_worker[-1][1]]
+        self.position_target_idx = poi_idx
         self.init_waypoints(waypoints_worker)
         self.done = False
         # self.stuck = False
@@ -255,6 +263,7 @@ color_map = {
     'Position of Interest': (0, 255, 0),  # Green
     'Agent': (0, 0, 255),  # Blue
     'Agent Trajectory': (75, 0, 130),  # Indigo
+    'Agent Orientation': (255, 127, 80),  # Coral
     'A* Path': (238, 130, 238),  # Violet
     'Goal': (255, 255, 0)  # Yellow
 }
@@ -923,6 +932,8 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         paint_neighbor(map_global, point, map_pixel_values["Position of Interest"])
 
     print('POIs: ', poi_positions)
+    for i in range(len(poi_positions)):
+        poi_available_idxs.append(True)
 
     empty_points, empty_positions = find_empty_points(
         occupancy_map=map_global, 
@@ -938,7 +949,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
 
     global curriculum
     worker_number = worker_number_mapping[curriculum]
-
+    
     for i in range(worker_number):
 
         name = "Worker_" + str(i+1)
@@ -964,14 +975,16 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
             )
         )
         map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
-        target_poi_idx = np.random.randint(len(poi_points))
+        poi_available = [idx for idx, value in enumerate(poi_available_idxs) if value]
+        target_poi_idx = np.random.choice(poi_available)
+        poi_available_idxs[target_poi_idx] = False
         target_poi_point = poi_points[target_poi_idx]
         position_start_meter = [position_xy[0], position_xy[1]]
         position_start = position_meter_to_pixel(position_start_meter)
         # map_global_with_worker[position_start[0]][position_start[1]] = map_pixel_values["Dynamic Obstacle"]
         paint_neighbor(map_global_with_worker, position_start, map_pixel_values["Dynamic Obstacle"])
         target_poi_waypoints, _ = a_star((position_start[0] * map_resolution, position_start[1] * map_resolution), (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), map_a_star)
-        worker_list[i].set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+        worker_list[i].set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0), target_poi_idx)
 
     # Add collision API for every prim in stage
     # for prim in stage.Traverse():
@@ -1341,6 +1354,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
         env.get_global_map(
             map_global=occupancy_map.copy() * map_pixel_values["Static Obstacle"],
             map_global_with_worker=map_global_with_worker.copy(),
+            worker_list = worker_list,
             resolution=map_resolution,
             offset=map_offset
         )
@@ -1517,6 +1531,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                     env.get_global_map(
                         map_global=occupancy_map.copy() * map_pixel_values["Static Obstacle"],
                         map_global_with_worker=map_global_with_worker.copy(),
+                        worker_list = worker_list,
                         resolution=map_resolution,
                         offset=map_offset
                     )
@@ -1563,8 +1578,26 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                         #         nearest_distance = distance
                         #         nearest_position = pos
                         worker.trajectory = []
-                        random_position_index = np.random.randint(len(empty_positions))
-                        position_xy = empty_positions[random_position_index]          
+
+                        map_global_with_agent = map_global.copy()
+
+                        for env in envs.envs:
+                            position_agent_raw, _ = env.camera_rig.get_pos_rot()
+                            position_agent_meter = [position_agent_raw[0], position_agent_raw[1]]
+                            position_agent_pixel = position_meter_to_pixel(position_agent_meter)
+                            paint_neighbor(map_global_with_agent, point, map_pixel_values["Agent"])
+                             
+
+                        _, empty_positions_reset = find_empty_points(
+                            occupancy_map=map_global_with_agent, 
+                            resolution=map_resolution,
+                            offset=map_offset,
+                            min_clear_radius=min_clear_radius, 
+                            min_edge_distance=min_edge_distance
+                        )
+
+                        random_position_index = np.random.randint(len(empty_positions_reset))
+                        position_xy = empty_positions_reset[random_position_index]          
                         worker.set_translate([position_xy[0], position_xy[1], 1])
                         worker.set_orient(euler_to_quaternion(0, 0, 0))
 
@@ -1581,12 +1614,15 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), 
                             map_a_star
                         )
-                        worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+                        worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0), worker.position_target_idx)
 
                     if worker_done:
                         # Go to the next POI
+                        poi_available_idxs[worker.position_target_idx] = True
                         map_a_star = OccupancyGridMap(data_array=occupancy_map, cell_size=map_resolution)
-                        target_poi_idx = np.random.randint(len(poi_points))
+                        poi_available = [idx for idx, value in enumerate(poi_available_idxs) if value]
+                        target_poi_idx = np.random.choice(poi_available)
+                        poi_available_idxs[target_poi_idx] = False
                         target_poi_point = poi_points[target_poi_idx]
                         position_current = worker.get_translate()
                         position_start_meter = [position_current[0], position_current[1]]
@@ -1596,7 +1632,7 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             (target_poi_point[0] * map_resolution, target_poi_point[1] * map_resolution), 
                             map_a_star
                         )
-                        worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0))
+                        worker.set_worker_waypoints(waypoints_2d_to_3d(target_poi_waypoints, 1.0), target_poi_idx)
                 
                     
                 # ================= Interact with the Isaac Sim Environment =======================
@@ -1617,31 +1653,51 @@ def main(fabric: Fabric, cfg: Dict[str, Any]):
                             rb.buffer[i]["is_first"][last_inserted_idx]
                         )
                         step_data["is_first"][i] = np.ones_like(step_data["is_first"][i])
-
+            
+            global success_rate
+            global ready_to_upgrade
             if cfg.metric.log_level > 0 and "final_info" in infos:
                 for i, agent_ep_info in enumerate(infos["final_info"]):
                     if agent_ep_info is not None:
-                        ep_rew = agent_ep_info["episode"]["r"]
-                        ep_len = agent_ep_info["episode"]["l"]
-                        ep_col = agent_ep_info["episode"]["c"]
-                        ep_goa = agent_ep_info["episode"]["g"]
+                        ep_suc = agent_ep_info["episode"]["s"]
+                        success_rate = ep_suc
+                        ready_to_upgrade = agent_ep_info["episode"]["ready"]
                         if aggregator and not aggregator.disabled:
-                            aggregator.update("Rewards/rew_avg", ep_rew)
-                            # print("log reward ave: ", ep_rew)
-                            aggregator.update("Game/ep_len_avg", ep_len)
-                            aggregator.update("Game/goal", ep_goa)
-                            aggregator.update("Game/collision", ep_col)
-                            # print("log len ave: ", ep_len)
-                            aggregator.update("Game/curriculum_level", curriculum)
-                        fabric.print(f"Rank-0: policy_step={policy_step}, average_reward_env_{i}={ep_rew}")
-                        if policy_step - last_log == cfg.metric.log_every:
-                            print("Judging Increasing")
-                            if ep_rew > curriculum_threshold and curriculum < max_curriculum:
-                                print(">>>>>>>>>>>>>>>Increasing Difficulty>>>>>>>>>>>>>>>>>>>")
-                                increase_difficulty = True
-                                worker_number = worker_number_mapping[curriculum]
-                                for env in envs.envs:
-                                    env.increase_difficulty(increase_difficulty)
+                            aggregator.update("Game/success_rate", ep_suc)
+
+                        if "r" in agent_ep_info["episode"]:
+                            ep_rew = agent_ep_info["episode"]["r"]
+                            ep_len = agent_ep_info["episode"]["l"]
+                            ep_col = agent_ep_info["episode"]["c"]
+                            ep_goa = agent_ep_info["episode"]["g"]
+                            ep_col_d = agent_ep_info["episode"]["c_d"]
+                            ep_col_s = agent_ep_info["episode"]["c_s"]
+                        
+                            if aggregator and not aggregator.disabled:
+                                aggregator.update("Rewards/rew_avg", ep_rew)
+                                # print("log reward ave: ", ep_rew)
+                                aggregator.update("Game/ep_len_avg", ep_len)
+                                aggregator.update("Game/goal", ep_goa)
+                                aggregator.update("Game/collision", ep_col)
+                                # print("log len ave: ", ep_len)
+                                aggregator.update("Game/curriculum_level", curriculum)
+                                aggregator.update("Game/collision_dynamic", ep_col_d)
+                                aggregator.update("Game/collision_static", ep_col_s)
+                            
+                            fabric.print(f"Rank-0: policy_step={policy_step}, average_reward_env_{i}={ep_rew}")
+
+            if policy_step - last_log >= cfg.metric.log_every and ready_to_upgrade:
+                print("Judging Increasing")
+                if success_rate > curriculum_threshold and curriculum < max_curriculum:
+                    print(">>>>>>>>>>>>>>>Increasing Difficulty>>>>>>>>>>>>>>>>>>>")
+                    increase_difficulty = True
+                    curriculum += 1
+                    worker_number = worker_number_mapping[curriculum]
+                    for env in envs.envs:
+                        env.increase_difficulty(increase_difficulty)      
+
+                    success_rate = 0.0 
+                    ready_to_upgrade = False                               
 
                         # Increasing the difficulty
                         # if ep_cur > curriculum and curriculum < max_curriculum:
